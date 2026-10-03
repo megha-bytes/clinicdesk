@@ -1,0 +1,15 @@
+# USD per 1M tokens, copied from the Token Factory pricing page.
+# Re-check before submission. Used by CostSpanProcessor.
+models:
+  nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B:
+    input: 0.00    # TODO
+    output: 0.00   # TODO
+  TODO-nemotron-3-super-id:
+    input: 0.00
+    output: 0.00
+  TODO-nemotron-3-ultra-id:
+    input: 0.00
+    output: 0.00
+
+tavily:
+  usd_per_credit: 0.00   # TODO
