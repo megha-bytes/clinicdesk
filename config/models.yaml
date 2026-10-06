@@ -1,23 +1,42 @@
-# Nemotron model tiers on Nebius Token Factory.
-# Fill in exact model IDs from the Token Factory console on Day 1 (spike.py).
 tiers:
   nano:
-    model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B   # verify
-    use_for: [emergency_classifier, intent, rail_checks]
+    model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
+    use_for:
+    - emergency_classifier
+    - intent
+    - rail_checks
     timeout_s: 8
   super:
-    model: TODO-nemotron-3-super-id
-    use_for: [conversation, tool_calling, onboarding_draft]
+    model: nvidia/nemotron-3-super-120b-a12b
+    use_for:
+    - conversation
+    - tool_calling
+    - onboarding_draft
     timeout_s: 20
   ultra:
-    model: TODO-nemotron-3-ultra-id
-    use_for: [handoff_summary, waitlist_replan, onboarding_review, insights]
+    model: nvidia/Nemotron-3-Ultra-550b-a55b
+    use_for:
+    - handoff_summary
+    - waitlist_replan
+    - onboarding_review
+    - insights
     timeout_s: 60
-  omni:            # stretch
+  omni:
     model: TODO-nemotron-3-nano-omni-id
-    use_for: [fee_board_photo]
+    use_for:
+    - fee_board_photo
     timeout_s: 20
-
+  lightning:
+    model: nvidia/Nemotron-3_5-Lightning
+    use_for:
+    - intent
+    - rail_checks
+    - fast_tool_calls
+    timeout_s: 8
 fallback:
-  super: [ultra, handoff]
-  nano: [deterministic_rules]
+  super:
+  - ultra
+  - handoff
+  nano:
+  - deterministic_rules
+safety_model: null
