@@ -21,6 +21,22 @@ def test_health_never_leaks_key(monkeypatch):
     assert "tf-super-secret-value" not in r.text
 
 
+def test_ping_never_touches_db(monkeypatch):
+    def boom():
+        raise AssertionError("ping must not query the database")
+
+    monkeypatch.setattr("app.db.ping", boom)
+    with TestClient(app) as client:
+        assert client.get("/ping").json() == {"ok": True}
+        assert client.head("/ping").status_code == 200
+
+
+def test_root_points_to_docs():
+    with TestClient(app) as client:
+        r = client.get("/")
+    assert r.status_code == 200 and r.json()["docs"] == "/docs"
+
+
 def test_cors_allows_local_frontend():
     with TestClient(app) as client:
         r = client.options(

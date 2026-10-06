@@ -16,7 +16,9 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 7 | Nebius AI Cloud VM (~$0.05/h ≈ $36/month) exceeds credits for a demo that must stay up until Dec 15 | Oct 3 | ⏸ Accepted | Local dev + free hosting (Render/Fly + Neon + Vercel); Nebius credits go to Token Factory. SecretStash/Serverless Jobs kept as upgrade path |
 | 8 | Builders Program application "under review" (extra $25 Token Factory + Tavily credits pending) | Oct 3 | 🟡 Waiting | Ask in Nebius Discord if no reply by Oct 7. Tavily isn't needed until Day 18 (Oct 21) |
 | 9 | Token Factory header shows "Trial: $1.00 · 27 days"; promo credit should total $29 | Oct 6 | 🟡 Check | Confirm in Billing that the promo credit is on the same account and project |
-| 10 | First deploy (Render + Neon) not done yet | Oct 6 | 🔴 Open | Day 2 leftover; do before the frontend work (Day 12) |
+| 10 | First deploy (Render + Neon) not done yet | Oct 6 | ✅ Resolved | Live at https://clinicdesk-api.onrender.com (Render free, Singapore; Neon free, Singapore). `/health` → prod, db ok, key set |
+| 11 | Render health check polled `/health` every few seconds; each check queries Neon, so the DB never scales to zero. Neon free = 100 CU-hours/month; 24/7 at 0.25 CU ≈ 180 → DB would be suspended mid-month (possibly during judging) | Oct 6 | 🟡 Fix shipped, needs Render setting | Added `/ping` (no DB). **Set Render → Settings → Health Check Path to `/ping`**; point UptimeRobot at `/ping`. Check Neon Monitoring shows compute going idle |
+| 12 | Screenshot of Render env vars showed most of the Token Factory prod key, and part of the Neon connection string | Oct 6 | 🟡 Confirm | Rotate: new Token Factory prod key (delete the old one) + Neon "Reset password"; update both on Render. Never screenshot env-var values |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -130,6 +132,40 @@ Kannada  29979 ms  "ನಾಳೆ ಬೆಳಿಗ್ಗೆ ಡಾ. ರಾವರ�
 **API running locally (Windows, Python 3.14)**
 - `pip install -r requirements.txt`, `alembic upgrade head`, `uvicorn app.main:app --reload` all worked on Python 3.14 (no 3.12 needed).
 - `/docs` shows the ClinicDesk API (v0.1.0) with `GET /health` and `GET /debug/trace`. ✅
+
+### 2026-10-06 · First deploy (Render + Neon)
+
+**Neon**
+- Project `clinicdesk`, AWS Asia Pacific 1 (Singapore), Postgres only (object storage, functions, AI gateway and auth left off).
+- Used the **direct** connection string (connection pooling toggled off) for migrations.
+
+**Render**
+- Web Service from `megha-bytes/clinicdesk`, Docker, branch `main`, root `backend/`, Singapore, Free (0.1 CPU, 512 MB).
+- Env vars: `APP_ENV=prod`, `DATABASE_URL` (Neon), `TOKEN_FACTORY_API_KEY` (prod key).
+- Build log:
+```
+INFO  [alembic.runtime.migration] Running upgrade  -> 28be1ddbc533, initial schema
+INFO:     Uvicorn running on http://0.0.0.0:10000
+INFO:     ... "GET /health HTTP/1.1" 200 OK
+==> Your service is live 🎉
+==> Available at your primary URL https://clinicdesk-api.onrender.com
+```
+- External check:
+```
+{"status":"ok","version":"0.1.0","env":"prod","db":"ok","token_factory_key":"set"}
+```
+→ Issue #10 resolved. ✅
+
+**Problems spotted in the log**
+- `GET /health` every few seconds from Render's health checker, and each one runs `SELECT 1` on Neon → Issue #11. Fix: `/ping` endpoint (no DB); Render health check and UptimeRobot moved to `/ping`.
+- `GET /` and `/favicon.ico` → 404 for visitors. Fix: `/` now returns the API name and links to `/docs` and `/health`.
+- Tests: 20 passed on SQLite and Postgres (new: `/ping` never touches the DB, `/` points to docs).
+
+**Secret exposure in a screenshot**
+- A screenshot of Render's Environment Variables page showed most of the Token Factory prod key and part of the Neon URL → Issue #12. Rule from now on: hide values (eye icon) or crop them out before sharing screenshots.
+
+**Build environment hiccup**
+- A `sed` edit with `#` in the replacement text failed silently in a command chain, so a commit briefly went out without the config and log changes; fixed by amending before the patch was shared. Lesson: use small Python edits, not `sed`, for files with special characters.
 
 ---
 

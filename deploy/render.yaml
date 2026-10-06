@@ -9,7 +9,7 @@ services:
     plan: free
     rootDir: backend
     dockerfilePath: ./Dockerfile
-    healthCheckPath: /health
+    healthCheckPath: /ping        # no DB query, so Neon can scale to zero
     autoDeploy: true
     envVars:
       - key: APP_ENV

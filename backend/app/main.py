@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
         try:
             from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-            FastAPIInstrumentor.instrument_app(app, excluded_urls="health")
+            FastAPIInstrumentor.instrument_app(app, excluded_urls="health,ping")
         except Exception:  # noqa: BLE001
             pass
     yield
@@ -42,9 +42,21 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+def root() -> dict:
+    return {"name": "ClinicDesk API", "version": VERSION, "docs": "/docs", "health": "/health"}
+
+
+@app.api_route("/ping", methods=["GET", "HEAD"])
+def ping() -> dict:
+    """Liveness only, no database. Point Render's health check and UptimeRobot here, so the
+    web service stays awake while Neon can still scale to zero (free plan: 100 CU-hours/month)."""
+    return {"ok": True}
+
+
 @app.get("/health")
 def health() -> dict:
-    """Liveness + readiness. Used by the host and by UptimeRobot (keeps free tiers awake)."""
+    """Readiness: checks the database and config. Touches the DB, so don't poll it every few seconds."""
     s = get_settings()
     return {
         "status": "ok",
