@@ -82,6 +82,7 @@ tiers = {
     "nano": pick("nemotron", "nano", avoid=("omni", "vl", "9b", "embed")),
     "super": pick("nemotron", "super", avoid=("49b", "llama")) or pick("nemotron", "super"),
     "ultra": pick("nemotron", "ultra", avoid=("253b", "llama")) or pick("nemotron", "ultra"),
+    "lightning": pick("nemotron", "lightning"),
     "omni": pick("nemotron", "omni"),
     "safety": pick("safety") or pick("guard"),
 }
@@ -108,7 +109,7 @@ results: dict[str, str] = {}
 
 # ---------------------------------------------------------------- 2. tiers
 header("2. Each tier answers (latency + tokens)")
-for tier in ("nano", "super", "ultra"):
+for tier in ("nano", "lightning", "super", "ultra"):
     model = tiers[tier]
     if not model:
         print(f"  {tier}: skipped (model not found)")
@@ -120,14 +121,14 @@ for tier in ("nano", "super", "ultra"):
             {"role": "user", "content": "What are your clinic timings?"},
         ])
         text = (r.choices[0].message.content or "").strip().replace("\n", " ")
-        print(f"  {tier:5s} {ms:7.0f} ms  {usage}\n        {text[:200]}")
+        print(f"  {tier:9s} {ms:7.0f} ms  {usage}\n        {text[:200]}")
         results[tier] = f"ok, {ms:.0f} ms"
     except Exception as e:  # noqa: BLE001
         print(f"  {tier}: FAILED {type(e).__name__}: {e}")
         results[tier] = f"failed: {type(e).__name__}"
 
 # ---------------------------------------------------------------- 3. tools
-header("3. Tool calling with Super")
+header("3. Tool calling (multi-round) with Super and Lightning")
 TOOLS = [
     {
         "type": "function",
@@ -166,40 +167,46 @@ FAKE_RESULTS = {
     "get_fee": {"fee_inr": 500},
 }
 
-tool_model = tiers["super"] or tiers["nano"]
-if not tool_model:
-    print("  skipped (no Super or Nano model)")
-    results["tools"] = "skipped"
-else:
-    try:
-        msgs = [
-            {"role": "system", "content": SYSTEM + " Use tools for any time or fee; never guess."},
-            {"role": "user", "content": "I'm a new patient. Can I see Dr. Rao tomorrow morning, and what's the fee?"},
-        ]
-        r, ms, usage = chat(tool_model, msgs, tools=TOOLS, tool_choice="auto")
-        calls = r.choices[0].message.tool_calls or []
-        print(f"  model: {tool_model}\n  {ms:.0f} ms  {usage}")
+
+
+def run_tool_test(model: str) -> str:
+    """Let the model call tools for up to 4 rounds (it may call find_slots, then get_fee)."""
+    msgs = [
+        {"role": "system", "content": SYSTEM + " Use tools for any time or fee; never guess."},
+        {"role": "user", "content": "I'm a new patient. Can I see Dr. Rao tomorrow morning, and what's the fee?"},
+    ]
+    total_calls = 0
+    for round_no in range(1, 5):
+        r, ms, usage = chat(model, msgs, tools=TOOLS, tool_choice="auto")
+        msg = r.choices[0].message
+        calls = msg.tool_calls or []
         if not calls:
-            print("  ⚠ No tool call made. Reply was:", (r.choices[0].message.content or "")[:200])
-            results["tools"] = "no tool call"
-        else:
-            msgs.append(r.choices[0].message.model_dump(exclude_none=True))
-            for c in calls:
-                print(f"  tool call -> {c.function.name}({c.function.arguments})")
-                msgs.append({
-                    "role": "tool",
-                    "tool_call_id": c.id,
-                    "content": json.dumps(FAKE_RESULTS.get(c.function.name, {})),
-                })
-            r2, ms2, usage2 = chat(tool_model, msgs, tools=TOOLS)
-            final = (r2.choices[0].message.content or "").strip().replace("\n", " ")
-            print(f"  final reply ({ms2:.0f} ms): {final[:300]}")
-            ok = "10:00" in final or "500" in final
-            print("  ✅ used tool results" if ok else "  ⚠ reply didn't quote the tool results")
-            results["tools"] = f"{len(calls)} call(s), " + ("used results" if ok else "check reply")
+            final = (msg.content or "").strip().replace("\n", " ")
+            if not final and getattr(msg, "reasoning_content", None):
+                print("    (reply empty; model only produced reasoning: raise max_tokens)")
+            print(f"    round {round_no}: final reply ({ms:.0f} ms, {usage}): {final[:300] or '<empty>'}")
+            ok = "10:00" in final and "500" in final
+            print("    ✅ used both tool results" if ok else "    ⚠ reply didn't quote both tool results")
+            return f"{total_calls} call(s) in {round_no} round(s), " + ("used results" if ok else "check reply")
+        msgs.append(msg.model_dump(exclude_none=True))
+        for c in calls:
+            total_calls += 1
+            print(f"    round {round_no}: {ms:.0f} ms  tool call -> {c.function.name}({c.function.arguments})")
+            msgs.append({"role": "tool", "tool_call_id": c.id,
+                         "content": json.dumps(FAKE_RESULTS.get(c.function.name, {}))})
+    return f"{total_calls} call(s), no final reply after 4 rounds"
+
+
+for tier in ("super", "lightning"):
+    model = tiers[tier]
+    if not model:
+        continue
+    print(f"  {tier}: {model}")
+    try:
+        results[f"tools:{tier}"] = run_tool_test(model)
     except Exception as e:  # noqa: BLE001
-        print(f"  FAILED {type(e).__name__}: {e}")
-        results["tools"] = f"failed: {type(e).__name__}"
+        print(f"    FAILED {type(e).__name__}: {e}")
+        results[f"tools:{tier}"] = f"failed: {type(e).__name__}"
 
 # ---------------------------------------------------------------- 4. languages
 header("4. Hindi and Kannada")
@@ -226,8 +233,11 @@ for lang, question in [
 models_path = ROOT / "config" / "models.yaml"
 try:
     cfg = yaml.safe_load(models_path.read_text(encoding="utf-8")) or {}
-    for tier in ("nano", "super", "ultra", "omni"):
-        if tiers.get(tier) and tier in cfg.get("tiers", {}):
+    cfg.setdefault("tiers", {})
+    if tiers.get("lightning") and "lightning" not in cfg["tiers"]:
+        cfg["tiers"]["lightning"] = {"model": None, "use_for": ["intent", "rail_checks", "fast_tool_calls"], "timeout_s": 8}
+    for tier in ("nano", "lightning", "super", "ultra", "omni"):
+        if tiers.get(tier) and tier in cfg["tiers"]:
             cfg["tiers"][tier]["model"] = tiers[tier]
     cfg["safety_model"] = tiers["safety"]
     models_path.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -237,6 +247,6 @@ except Exception as e:  # noqa: BLE001
 
 header("Summary")
 for k, v in {**{f"model:{t}": tiers[t] or "NOT FOUND" for t in tiers}, **results}.items():
-    print(f"  {k:14s} {v}")
+    print(f"  {k:16s} {v}")
 print(f"\n  {saved}")
 print("  Next: check the Hindi/Kannada replies read naturally, then commit config/models.yaml.")
