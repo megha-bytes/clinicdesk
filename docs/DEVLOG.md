@@ -120,6 +120,17 @@ Kannada  29979 ms  "ನಾಳೆ ಬೆಳಿಗ್ಗೆ ಡಾ. ರಾವರ�
 ```
 → Issue #3 (≈10× slower than English). Issue #1: Hindi invented "9 or 10 am" slots and promised to book; Kannada invented "limited places". Issue #4: English word mixed into Kannada.
 
+### 2026-10-06 · Local API run
+
+**`.env.example` showed as deleted**
+- Symptom: `git status` → `deleted: .env.example` after creating `.env.local`.
+- Cause: the example file was renamed to `.env.local` instead of copied.
+- Fix: `git restore .env.example`. `.env.local` stays untracked (git-ignored), as intended. ✅
+
+**API running locally (Windows, Python 3.14)**
+- `pip install -r requirements.txt`, `alembic upgrade head`, `uvicorn app.main:app --reload` all worked on Python 3.14 (no 3.12 needed).
+- `/docs` shows the ClinicDesk API (v0.1.0) with `GET /health` and `GET /debug/trace`. ✅
+
 ---
 
 ## How to add an entry
