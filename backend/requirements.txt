@@ -7,6 +7,7 @@ psycopg[binary]>=3.2
 openai>=1.40
 python-dotenv>=1.0
 pyyaml>=6.0
+tzdata>=2024.1          # timezone data for Windows (no system tz database there)
 opentelemetry-sdk>=1.27
 opentelemetry-exporter-otlp-proto-grpc>=1.27
 opentelemetry-instrumentation-fastapi>=0.48b0

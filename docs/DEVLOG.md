@@ -17,8 +17,10 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 8 | Builders Program application "under review" (extra $25 Token Factory + Tavily credits pending) | Oct 3 | 🟡 Waiting | Ask in Nebius Discord if no reply by Oct 7. Tavily isn't needed until Day 18 (Oct 21) |
 | 9 | Token Factory header shows "Trial: $1.00 · 27 days"; promo credit should total $29 | Oct 6 | 🟡 Check | Confirm in Billing that the promo credit is on the same account and project |
 | 10 | First deploy (Render + Neon) not done yet | Oct 6 | ✅ Resolved | Live at https://clinicdesk-api.onrender.com (Render free, Singapore; Neon free, Singapore). `/health` → prod, db ok, key set |
-| 11 | Render health check polled `/health` every few seconds; each check queries Neon, so the DB never scales to zero. Neon free = 100 CU-hours/month; 24/7 at 0.25 CU ≈ 180 → DB would be suspended mid-month (possibly during judging) | Oct 6 | 🟡 Fix shipped, needs Render setting | Added `/ping` (no DB). **Set Render → Settings → Health Check Path to `/ping`**; point UptimeRobot at `/ping`. Check Neon Monitoring shows compute going idle |
-| 12 | Screenshot of Render env vars showed most of the Token Factory prod key, and part of the Neon connection string | Oct 6 | 🟡 Confirm | Rotate: new Token Factory prod key (delete the old one) + Neon "Reset password"; update both on Render. Never screenshot env-var values |
+| 11 | Render health check polled `/health` every few seconds; each check queries Neon, so the DB never scales to zero. Neon free = 100 CU-hours/month; 24/7 at 0.25 CU ≈ 180 → DB would be suspended mid-month (possibly during judging) | Oct 6 | ✅ Resolved | Added `/ping` (no DB). Render health check path set to `/ping`; UptimeRobot monitors `/ping` every 5 min. (Still worth glancing at Neon Monitoring to confirm compute goes idle) |
+| 12 | Screenshot of Render env vars showed most of the Token Factory prod key, and part of the Neon connection string | Oct 6 | ✅ Resolved | Rotated: new Token Factory prod key (old one deleted) + Neon password reset; both updated on Render. Rule: never screenshot env-var values |
+| 13 | Slot ranking ignored an explicit time-of-day request ("evening") when the preferred time was outside it, and offered 12:40 instead | Oct 6 | ✅ Resolved | Closeness is now measured from the nearest edge of the requested window; test `test_requested_window_beats_closeness` |
+| 14 | `ZoneInfo("Asia/Kolkata")` fails on Windows (no system timezone database) | Oct 6 | ✅ Resolved | Added `tzdata` to requirements; reproduced the error and the fix |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -166,6 +168,29 @@ INFO:     ... "GET /health HTTP/1.1" 200 OK
 
 **Build environment hiccup**
 - A `sed` edit with `#` in the replacement text failed silently in a command chain, so a commit briefly went out without the config and log changes; fixed by amending before the patch was shared. Lesson: use small Python edits, not `sed`, for files with special characters.
+
+### 2026-10-06 · Scheduling engine (Days 3–4)
+
+Built `backend/app/engine/`: pure Python, no DB or model calls, so every booking decision is deterministic.
+- `availability.py`: sessions minus breaks, leave, daily caps; `validate_slot` raises a coded `BookingError` (`IN_PAST`, `ON_LEAVE`, `OUTSIDE_HOURS`, `ON_BREAK`, `OVERLAP`, `DAILY_CAP_REACHED`); `free_slots` on a 10-min grid with lead time.
+- `operations.py`: hold (expires after 5 min) → confirm (only a live hold; re-validates; assigns token numbers in token style), cancel, reschedule (keeps length, can change doctor), check-in → start → complete, no-show; `check_duration` stops the model inventing appointment lengths (`WRONG_DURATION`).
+- `scoring.py`: ranks valid slots (requested window/doctor, closeness, short gaps left, same doctor as last visit, language) and returns the top 3 at least 30 min apart; deterministic tie-breaks.
+- `queue.py`: token numbers never reused; order is by token, only staff-urgent jumps ahead (no payment field exists, so payment can't affect order); wait = time until session opens + remainder of current consult + patients ahead × pace; pace blends the doctor's average with today's completed consults (full trust after 5).
+- `waitlist.py`: offers a freed slot to the earliest matching request that fits.
+
+Tests: **82 passed** on SQLite and Postgres (62 engine tests + 20 earlier).
+
+Problems found while building:
+- The first test run failed one ranking test: asking for "evening" with a preferred time of 13:00 offered 12:40 → Issue #13, fixed.
+```
+FAILED tests/engine/test_scoring_waitlist.py::test_requested_window_beats_closeness
+1 failed, 61 passed
+```
+- Timezones on Windows → Issue #14, fixed with `tzdata`:
+```
+zoneinfo._common.ZoneInfoNotFoundError: 'No time zone found with key Asia/Kolkata'
+```
+- Build-environment only: the temporary local Postgres used for testing stopped between steps because sandbox folder permissions reset; restarted it. Not relevant to the laptop or Render.
 
 ---
 
