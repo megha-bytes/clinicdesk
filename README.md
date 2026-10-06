@@ -35,7 +35,7 @@ docs/        security, architecture, feedback log
 - Emergencies are screened before every reply and redirected to **108 / 112** (and **Tele-MANAS 14416**).
 - The demo uses **synthetic data only**.
 
-See [docs/SECURITY.md](docs/SECURITY.md).
+See [docs/SECURITY.md](docs/SECURITY.md). Build notes, problems and test results: [docs/DEVLOG.md](docs/DEVLOG.md).
 
 ## Development setup
 
