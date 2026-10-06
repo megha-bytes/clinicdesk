@@ -38,11 +38,36 @@ docs/        security, architecture, feedback log
 See [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Development setup
+
+**Prerequisites:** Python 3.12+, Git. Docker Desktop is optional (for Postgres and Jaeger traces locally).
+
 ```bash
-cp .env.example .env.local        # fill in your own keys; never commit them
-pip install pre-commit && pre-commit install   # gitleaks secret scanning on every commit
+# 1. Your dev key (never committed: .env.local is git-ignored)
+cp .env.example .env.local          # then set TOKEN_FACTORY_API_KEY=...
+
+# 2. Secret scanning on every commit
+pip install pre-commit && pre-commit install
+
+# 3. Check Token Factory + Nemotron (tiers, tool calling, Hindi, Kannada)
+pip install openai python-dotenv pyyaml
+python scripts/spike.py
+
+# 4. Run the API (SQLite by default)
+cd backend
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn app.main:app --reload       # http://localhost:8000/health, docs at /docs
+
+# 5. Tests
+pytest
 ```
-Full setup instructions will be added as components land.
+
+**Full local stack with Docker** (Postgres, OpenTelemetry Collector, Jaeger):
+```bash
+docker compose -f deploy/docker-compose.yml up --build
+# API http://localhost:8000/health · Jaeger http://localhost:16686
+# Visit http://localhost:8000/debug/trace, then find the span in Jaeger (phone numbers are redacted)
+```
 
 ## Licence
 [Apache-2.0](LICENSE)

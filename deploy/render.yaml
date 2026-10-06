@@ -1,0 +1,26 @@
+# Render Blueprint for the ClinicDesk backend (free plan).
+# Render looks for render.yaml at the repo root by default; when creating the Blueprint,
+# point it at deploy/render.yaml (or copy this file to the root).
+# Secrets are NOT stored here: values marked `sync: false` are entered in the Render dashboard.
+services:
+  - type: web
+    name: clinicdesk-api
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: SECRETS_PROVIDER
+        value: env
+      - key: OTEL_ENABLED
+        value: "true"
+      - key: DATABASE_URL           # Neon / Supabase connection string
+        sync: false
+      - key: TOKEN_FACTORY_API_KEY  # PROD key (not your laptop key)
+        sync: false
+      - key: CORS_ORIGINS           # your frontend URL once it exists (Day 12)
+        value: http://localhost:5173
