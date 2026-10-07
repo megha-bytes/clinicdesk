@@ -1,6 +1,7 @@
 """Typed settings. Non-secret config comes from env vars; secrets via SecretsProvider."""
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -10,11 +11,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.secrets import SecretNotFound, get_secrets_provider
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+ENV_FILE = REPO_ROOT / ".env.local"
+
+
+def _testing() -> bool:
+    # Tests must never read the developer's real keys from .env.local.
+    return os.environ.get("APP_ENV") == "test"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(REPO_ROOT / ".env.local",),
+        env_file=None if _testing() else (ENV_FILE,),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -59,8 +66,7 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     s = Settings()
     # Load .env.local into the process env too, so EnvProvider can see secrets in dev.
-    env_file = REPO_ROOT / ".env.local"
-    if env_file.exists():
+    if not _testing() and ENV_FILE.exists():
         from dotenv import load_dotenv
-        load_dotenv(env_file, override=False)
+        load_dotenv(ENV_FILE, override=False)
     return s

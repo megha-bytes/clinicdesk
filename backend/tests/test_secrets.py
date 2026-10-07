@@ -69,3 +69,15 @@ def test_secretstash_provider_parses_cli_json(monkeypatch):
 def test_secretstash_requires_id():
     with pytest.raises(ValueError):
         SecretStashProvider("")
+
+
+def test_tests_never_read_dot_env_local():
+    """Regression: a developer's real .env.local must not leak into tests."""
+    from app.settings import ENV_FILE, Settings, get_settings
+
+    get_settings.cache_clear()
+    get_settings()
+    assert "TOKEN_FACTORY_API_KEY" not in __import__("os").environ
+    assert Settings().token_factory_api_key is None
+    assert Settings.model_config["env_file"] is None
+    assert ENV_FILE.name == ".env.local"

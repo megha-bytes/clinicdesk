@@ -24,6 +24,8 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 15 | Routing sent "child is coughing" (Kannada) and "my baby has a rash" to the GP / dermatologist instead of the pediatrician | Oct 7 | ✅ Resolved | Routing rules now have a clinic-set `priority` (pediatrics = 10); highest priority wins, then the most specific keyword |
 | 16 | SQLite drops timezone offsets, so a 10:00 IST booking would read back as 10:00 UTC (3:30 pm IST) | Oct 7 | ✅ Resolved | All timestamps stored in UTC; converted to clinic time on the way out; day queries use UTC bounds |
 | 17 | Demo data can't be loaded on Render free (no shell to run `python -m app.seed`) | Oct 7 | 🟡 Needs setup | `POST /admin/reset-demo` (needs `DEMO_RESET_TOKEN`, hidden from docs, 404 when unset) + nightly GitHub Action. Set the token on Render and in GitHub secrets, then call it once |
+| 18 | Day 5 patch failed on the laptop (`patch failed: docs/DEVLOG.md`) because the engine patch hadn't been applied first | Oct 7 | ✅ Resolved | `git am --abort`, applied engine then Day 5. From now on patches are numbered and say which commit they need |
+| 19 | Tests read the developer's real `.env.local`: `/health` test saw `token_factory_key == "set"` on the laptop (passed in CI and the build environment, which have no `.env.local`) | Oct 7 | ✅ Resolved | Test mode never loads `.env.local`; regression test added. Verified the app still reads it in normal runs |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -229,6 +231,25 @@ FAILED test_routing_uses_clinic_table[my baby has a rash-Pediatrician]
 - Test helper `call(ctx, name, **args)` clashed with tools that take a `name` argument (`TypeError: got multiple values for argument 'name'`); renamed to `tool`. Test-only.
 - `/ping` registered for GET+HEAD under one name produced a duplicate-operation warning in the API docs; split into separate GET and hidden HEAD routes.
 - The `priority` column is NOT NULL; added a server default so the migration works on databases that already have rows.
+
+### 2026-10-07 · Applying Day 5 on the laptop
+
+**Patch order**
+```
+git am clinicdesk-day5.patch
+error: patch failed: docs/DEVLOG.md:21
+error: docs/DEVLOG.md: patch does not apply
+```
+- Cause: the engine patch (Days 3–4) hadn't been applied, so the dev log didn't contain the lines Day 5 expected.
+- Fix: `git am --abort`, then engine patch, then Day 5 → applied. → Issue #18.
+
+**Test failure only on the laptop**
+```
+FAILED tests/test_health.py::test_health_reports_ok_and_db - AssertionError: assert 'set' == 'missing'
+1 failed, 130 passed
+```
+- Cause: `conftest.py` removed the key from the environment, but `get_settings()` then loaded `.env.local` (the real dev key) back in. CI and the build environment have no `.env.local`, so they passed.
+- Fix: settings skip `.env.local` when `APP_ENV=test`; regression test `test_tests_never_read_dot_env_local`. Reproduced with a fake `.env.local` (1 failed) → fixed (132 passed, with and without the file) → confirmed normal runs still read the key. → Issue #19.
 
 ---
 
