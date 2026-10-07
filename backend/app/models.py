@@ -66,6 +66,8 @@ class Doctor(TimestampMixin, Base):
     leave: Mapped[list] = mapped_column(JSON, default=list)      # ["2026-10-20", ...]
     daily_cap: Mapped[int | None] = mapped_column(Integer)
     avg_consult_min: Mapped[float] = mapped_column(Float, default=10.0)
+    # None = use the clinic's style. Lets one doctor run timed slots and another a token queue.
+    booking_style: Mapped[str | None] = mapped_column(String(10))
 
     clinic: Mapped[Clinic] = relationship(back_populates="doctors")
 
@@ -94,6 +96,8 @@ class RoutingRule(Base):
     keyword: Mapped[str] = mapped_column(String(100))
     doctor_id: Mapped[str | None] = mapped_column(ForeignKey("doctor.id", ondelete="SET NULL"))
     specialty: Mapped[str | None] = mapped_column(String(100))
+    # Higher wins when several rules match (e.g. "child" + "cough" → pediatrics). Set by the clinic.
+    priority: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 # ------------------------------------------------------------------ patients & bookings
@@ -130,6 +134,8 @@ class Appointment(TimestampMixin, Base):
     urgent_by_staff: Mapped[bool] = mapped_column(Boolean, default=False)
     source: Mapped[str] = mapped_column(String(8), default="web")
     a2a_caller_id: Mapped[str | None] = mapped_column(ForeignKey("a2a_caller.id", ondelete="SET NULL"))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))    # consultation began
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # consultation ended
 
     __table_args__ = (
         Index("ix_appt_doctor_start", "doctor_id", "start"),

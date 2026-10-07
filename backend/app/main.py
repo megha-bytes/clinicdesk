@@ -11,6 +11,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import db
+from app.admin import router as admin_router
+from app.payments.routes import router as payments_router
 from app.settings import get_settings
 from app.telemetry import setup_telemetry, tracer
 
@@ -42,12 +44,17 @@ app.add_middleware(
 )
 
 
+app.include_router(payments_router)
+app.include_router(admin_router)
+
+
 @app.get("/")
 def root() -> dict:
     return {"name": "ClinicDesk API", "version": VERSION, "docs": "/docs", "health": "/health"}
 
 
-@app.api_route("/ping", methods=["GET", "HEAD"])
+@app.head("/ping", include_in_schema=False)
+@app.get("/ping")
 def ping() -> dict:
     """Liveness only, no database. Point Render's health check and UptimeRobot here, so the
     web service stays awake while Neon can still scale to zero (free plan: 100 CU-hours/month)."""

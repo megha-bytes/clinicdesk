@@ -1,0 +1,26 @@
+name: Nightly demo reset
+
+# Rebuilds the synthetic demo clinic every night so judges always see a clean, full schedule.
+# Needs two repository secrets: DEMO_API_URL (e.g. https://clinicdesk-api.onrender.com)
+# and DEMO_RESET_TOKEN (same value as on Render). Skips quietly if they aren't set.
+on:
+  schedule:
+    - cron: "30 21 * * *"     # 03:00 IST
+  workflow_dispatch: {}
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reset demo clinic
+        env:
+          DEMO_API_URL: ${{ secrets.DEMO_API_URL }}
+          DEMO_RESET_TOKEN: ${{ secrets.DEMO_RESET_TOKEN }}
+        run: |
+          if [ -z "$DEMO_API_URL" ] || [ -z "$DEMO_RESET_TOKEN" ]; then
+            echo "DEMO_API_URL / DEMO_RESET_TOKEN not set; skipping."; exit 0
+          fi
+          # Wake the free instance first (it may be asleep), then reset.
+          curl -fsS --retry 5 --retry-delay 15 --max-time 90 "$DEMO_API_URL/ping"
+          curl -fsS --max-time 120 -X POST "$DEMO_API_URL/admin/reset-demo" \
+               -H "X-Demo-Reset-Token: $DEMO_RESET_TOKEN"

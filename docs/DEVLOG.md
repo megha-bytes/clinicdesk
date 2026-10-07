@@ -21,6 +21,9 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 12 | Screenshot of Render env vars showed most of the Token Factory prod key, and part of the Neon connection string | Oct 6 | ✅ Resolved | Rotated: new Token Factory prod key (old one deleted) + Neon password reset; both updated on Render. Rule: never screenshot env-var values |
 | 13 | Slot ranking ignored an explicit time-of-day request ("evening") when the preferred time was outside it, and offered 12:40 instead | Oct 6 | ✅ Resolved | Closeness is now measured from the nearest edge of the requested window; test `test_requested_window_beats_closeness` |
 | 14 | `ZoneInfo("Asia/Kolkata")` fails on Windows (no system timezone database) | Oct 6 | ✅ Resolved | Added `tzdata` to requirements; reproduced the error and the fix |
+| 15 | Routing sent "child is coughing" (Kannada) and "my baby has a rash" to the GP / dermatologist instead of the pediatrician | Oct 7 | ✅ Resolved | Routing rules now have a clinic-set `priority` (pediatrics = 10); highest priority wins, then the most specific keyword |
+| 16 | SQLite drops timezone offsets, so a 10:00 IST booking would read back as 10:00 UTC (3:30 pm IST) | Oct 7 | ✅ Resolved | All timestamps stored in UTC; converted to clinic time on the way out; day queries use UTC bounds |
+| 17 | Demo data can't be loaded on Render free (no shell to run `python -m app.seed`) | Oct 7 | 🟡 Needs setup | `POST /admin/reset-demo` (needs `DEMO_RESET_TOKEN`, hidden from docs, 404 when unset) + nightly GitHub Action. Set the token on Render and in GitHub secrets, then call it once |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -191,6 +194,41 @@ FAILED tests/engine/test_scoring_waitlist.py::test_requested_window_beats_closen
 zoneinfo._common.ZoneInfoNotFoundError: 'No time zone found with key Asia/Kolkata'
 ```
 - Build-environment only: the temporary local Postgres used for testing stopped between steps because sandbox folder permissions reset; restarted it. Not relevant to the laptop or Render.
+
+### 2026-10-07 · Day 5: seed data, tools, payments, events
+
+Built:
+- **Migration 2**: appointment `started_at`/`completed_at` (live queue), doctor `booking_style` (one doctor timed, another token queue), routing `priority`. Tested up/down on Postgres, including upgrading a DB that already has routing rules.
+- **`app/seed.py`**: Sunrise Family Clinic (demo), 4 doctors: Dr. Ananya Rao (GP, timed), Dr. Meera Nair (GP, **token queue**), Dr. Vikram Iyer (dermatology, Mon/Wed/Fri, cap 18), Dr. Farah Khan (pediatrics, on leave in 3 days); 3 appointment types (new 20 min ₹500, follow-up 10 min ₹300, dressing 15 min ₹400); routing keywords in English, Hindi and Kannada; 60 fake patients (phones 9000000001–60); ~234 appointments over a week; today's past visits marked completed with realistic times, one "with the doctor"; 2 waitlist entries. Idempotent; `--reset` rebuilds.
+- **`app/agent/tools.py`**: 13 model tools + 1 guardrail-only tool (`raise_emergency_alert`, never offered to the model). Typed inputs, engine-validated decisions, coded errors (never exceptions), privacy-safe lookups (same NOT_FOUND for wrong name and unknown phone), audit log on every change, OpenAI function-calling specs generated from the input models.
+- **Payments**: `MockPaymentProvider` (link to our `/pay/<id>` page with a "TEST PAYMENT" label and a pay button); `RazorpayProvider` (test keys only, refuses `rzp_live_`), webhook with HMAC signature check. Amount always from the fee table; link creation is idempotent.
+- **`app/realtime/events.py`**: `ExecutionEvent` schema + factory with increasing `seq`.
+- **`/admin/reset-demo`** + nightly GitHub Action (03:00 IST) → Issue #17.
+
+Tests: **131 passed** on SQLite and Postgres (49 new).
+
+Live end-to-end run (local server + Postgres):
+```
+--- reset (wrong token): 401
+--- reset: {"created":true,"doctors":4,"patients":60,"appointments":234,"first_day":"2026-10-07"}
+route: General Physician                      ← "मुझे बुखार है"
+slots: ['Thu 8 Oct, 9:10 AM', 'Thu 8 Oct, 9:40 AM', 'Thu 8 Oct, 10:30 AM']
+booked: Dr. Ananya Rao Thu 8 Oct, 9:10 AM confirmed
+link: http://localhost:8079/pay/<id> 500
+--- pay page: TEST PAYMENT · no real money · ₹500 · Pay ₹500 (test)
+--- pay: ✓ Paid        → payment row: paid | 500 | paid_at set
+```
+
+Problems found while building:
+- Routing priority → Issue #15 (caught by tests).
+```
+FAILED test_routing_uses_clinic_table[ಮಗು ಕೆಮ್ಮುತ್ತಿದೆ-Pediatrician]
+FAILED test_routing_uses_clinic_table[my baby has a rash-Pediatrician]
+```
+- SQLite timezone handling → Issue #16 (spotted while writing the adapter, before it caused a bug).
+- Test helper `call(ctx, name, **args)` clashed with tools that take a `name` argument (`TypeError: got multiple values for argument 'name'`); renamed to `tool`. Test-only.
+- `/ping` registered for GET+HEAD under one name produced a duplicate-operation warning in the API docs; split into separate GET and hidden HEAD routes.
+- The `priority` column is NOT NULL; added a server default so the migration works on databases that already have rows.
 
 ---
 

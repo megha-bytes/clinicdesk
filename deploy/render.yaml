@@ -24,3 +24,9 @@ services:
         sync: false
       - key: CORS_ORIGINS           # your frontend URL once it exists (Day 12)
         value: http://localhost:5173
+      - key: PUBLIC_BASE_URL        # builds the demo payment links
+        value: https://clinicdesk-api.onrender.com
+      - key: PAYMENT_PROVIDER
+        value: mock
+      - key: DEMO_RESET_TOKEN       # long random string; also stored as a GitHub Actions secret
+        sync: false

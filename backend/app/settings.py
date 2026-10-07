@@ -24,12 +24,14 @@ class Settings(BaseSettings):
     token_factory_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
     cors_origins: str = "http://localhost:5173"
     daily_spend_cap_usd: float = 2.0
+    public_base_url: str = "http://localhost:8000"   # used to build mock payment links
+    payment_provider: str = "mock"                    # mock | razorpay (test mode only)
 
     otel_enabled: bool = True
     otel_service_name: str = "clinicdesk"
     otel_exporter_otlp_endpoint: str | None = None   # e.g. http://localhost:4317
 
-    @field_validator("database_url", "token_factory_base_url", "cors_origins", mode="before")
+    @field_validator("database_url", "token_factory_base_url", "cors_origins", "public_base_url", "payment_provider", mode="before")
     @classmethod
     def _blank_means_default(cls, v, info):
         # A blank line copied from .env.example (e.g. "DATABASE_URL=") falls back to the default.
