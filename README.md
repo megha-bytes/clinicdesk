@@ -27,7 +27,7 @@ companion/   "Patient Companion" demo A2A client
 config/      model tiers and pricing
 frontend/    React PWA: patient app and staff dashboard
 deploy/      docker-compose, OTel collector, Nebius deployment
-docs/        security, architecture, feedback log
+docs/        security, architecture, dev log
 ```
 
 ## Safety & privacy
@@ -60,6 +60,12 @@ uvicorn app.main:app --reload       # http://localhost:8000/health, docs at /doc
 
 # 5. Tests
 pytest
+
+# 6. Chat with the agent in the terminal (demo clinic, real Nemotron models)
+python -m app.cli_chat
+
+# 7. Which reasoning switch works on Token Factory + Hindi/Kannada latency per model
+cd .. && python scripts/check_reasoning.py
 ```
 
 **Full local stack with Docker** (Postgres, OpenTelemetry Collector, Jaeger):

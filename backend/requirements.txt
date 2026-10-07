@@ -5,6 +5,7 @@ sqlalchemy>=2.0
 alembic>=1.13
 psycopg[binary]>=3.2
 openai>=1.40
+langgraph>=1.0
 python-dotenv>=1.0
 pyyaml>=6.0
 tzdata>=2024.1          # timezone data for Windows (no system tz database there)

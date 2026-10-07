@@ -1,15 +1,20 @@
-# USD per 1M tokens, copied from the Token Factory pricing page.
-# Re-check before submission. Used by CostSpanProcessor.
+# USD per 1M tokens, used by the model router to cost every call.
+# ⚠ UNVERIFIED: taken from third-party listings of Nebius Token Factory prices (Oct 2026).
+#   Check the Token Factory model catalog and correct these before quoting costs in the README/video.
+#   Lightning has no public price yet; it's set to Nano's (same 30B-A3B size) as an estimate.
 models:
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B:
-    input: 0.00    # TODO
-    output: 0.00   # TODO
-  TODO-nemotron-3-super-id:
-    input: 0.00
-    output: 0.00
-  TODO-nemotron-3-ultra-id:
-    input: 0.00
-    output: 0.00
+    input: 0.06
+    output: 0.24
+  nvidia/Nemotron-3_5-Lightning:
+    input: 0.06
+    output: 0.24
+  nvidia/nemotron-3-super-120b-a12b:
+    input: 0.20
+    output: 0.80
+  nvidia/Nemotron-3-Ultra-550b-a55b:
+    input: 0.50
+    output: 2.50
 
 tavily:
-  usd_per_credit: 0.00   # TODO
+  usd_per_credit: 0.00   # TODO when Tavily credits arrive

@@ -48,6 +48,7 @@ app.include_router(payments_router)
 app.include_router(admin_router)
 
 
+@app.head("/", include_in_schema=False)
 @app.get("/")
 def root() -> dict:
     return {"name": "ClinicDesk API", "version": VERSION, "docs": "/docs", "health": "/health"}

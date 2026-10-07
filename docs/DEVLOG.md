@@ -8,8 +8,8 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | # | Issue | Found | Status | Resolution / next step |
 |---|---|---|---|---|
 | 1 | Models invent facts (hours, slots, phone numbers, websites) when they have no tool data | Oct 6 | 🔴 Open | Build the `verified_facts` output rail (Day 10); replies may only state values returned by tools. Re-run the spike prompts through the full graph to confirm |
-| 2 | Lightning leaks its reasoning ("Here's a thinking process…") into plain-text replies and hits the token cap | Oct 6 | 🔴 Open | Model router (Day 6): switch reasoning off for Lightning, and strip any thinking text before it reaches a patient. Add a test |
-| 3 | Hindi/Kannada replies via Super took ~28–30 s (English ~2.8 s) | Oct 6 | 🔴 Open | Re-measure in the router with reasoning off; try Ultra/Lightning for Indic replies. Target: first token < 1.5 s, full reply < 4 s p95 |
+| 2 | Lightning leaks its reasoning ("Here's a thinking process…") into plain-text replies and hits the token cap | Oct 6 | 🟡 Fix shipped, verify live | Router sends `enable_thinking=false`, strips `<think>` blocks, detects untagged reasoning → retries with `/no_think` → falls back to Nano; a leaked reply is never returned (tests). **Run `scripts/check_reasoning.py` to confirm which switch Token Factory honours** |
+| 3 | Hindi/Kannada replies via Super took ~28–30 s (English ~2.8 s) | Oct 6 | 🟡 Measure | `scripts/check_reasoning.py` times Hindi and Kannada per tier with reasoning off; pick the reply tier from that. Target: full reply < 4 s |
 | 4 | Kannada reply mixed in English ("ಮಿತ Places") | Oct 6 | 🟡 Watch | Prompt: "reply only in Kannada script"; add a language check to the output rail; native-speaker check before the video |
 | 5 | Super calls tools one at a time (3 rounds), so naive single-round code returns an empty reply | Oct 6 | ✅ Resolved | Spike loops until a final reply; the agent graph must do the same (tool loop with max rounds) |
 | 6 | Nemotron Nano Omni and a Nemotron safety-guard model are not on Token Factory | Oct 6 | ⏸ Accepted | Dropped fee-board photo onboarding; content-safety rail uses NeMo's self-check prompt on the fast tier |
@@ -26,6 +26,10 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 17 | Demo data can't be loaded on Render free (no shell to run `python -m app.seed`) | Oct 7 | 🟡 Needs setup | `POST /admin/reset-demo` (needs `DEMO_RESET_TOKEN`, hidden from docs, 404 when unset) + nightly GitHub Action. Set the token on Render and in GitHub secrets, then call it once |
 | 18 | Day 5 patch failed on the laptop (`patch failed: docs/DEVLOG.md`) because the engine patch hadn't been applied first | Oct 7 | ✅ Resolved | `git am --abort`, applied engine then Day 5. From now on patches are numbered and say which commit they need |
 | 19 | Tests read the developer's real `.env.local`: `/health` test saw `token_factory_key == "set"` on the laptop (passed in CI and the build environment, which have no `.env.local`) | Oct 7 | ✅ Resolved | Test mode never loads `.env.local`; regression test added. Verified the app still reads it in normal runs |
+| 20 | `DEMO_RESET_TOKEN` was pasted into chat (in a curl command) | Oct 7 | 🟡 Confirm | Rotate on Render; store the new one only as a GitHub secret and trigger the reset from GitHub Actions instead of curl |
+| 21 | Render builds only `backend/`, so `config/pricing.yaml` isn't in the container → live costs would silently be $0 | Oct 7 | ✅ Resolved | Model IDs and prices have defaults in code; YAML files override when present. Test `test_defaults_without_config_files` |
+| 22 | Token Factory might reject `chat_template_kwargs` (400) or JSON mode, which would make every fast-tier call fail and fall back | Oct 7 | ✅ Resolved (defensive) | On a 400/422 the router switches that model to the `/no_think` style and remembers; intent classification no longer relies on JSON mode (tolerant parsing) |
+| 23 | Token Factory prices are unverified (pricing page blocks automated access) | Oct 7 | 🟡 Check | Confirm Nano/Lightning/Super/Ultra prices in the Token Factory model catalog; update `DEFAULT_PRICES` + `config/pricing.yaml` before quoting costs |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -250,6 +254,36 @@ FAILED tests/test_health.py::test_health_reports_ok_and_db - AssertionError: ass
 ```
 - Cause: `conftest.py` removed the key from the environment, but `get_settings()` then loaded `.env.local` (the real dev key) back in. CI and the build environment have no `.env.local`, so they passed.
 - Fix: settings skip `.env.local` when `APP_ENV=test`; regression test `test_tests_never_read_dot_env_local`. Reproduced with a fake `.env.local` (1 failed) → fixed (132 passed, with and without the file) → confirmed normal runs still read the key. → Issue #19.
+
+### 2026-10-07 · Day 6: model router, cost ledger, first graph
+
+Built:
+- **`app/agent/models.py`**: `ModelRouter` over Token Factory. Tiers: Lightning (intent, tool selection; reasoning off), Super (replies; reasoning off), Ultra (summaries; reasoning on), Nano (fallback). Fallbacks: Lightning → Nano, Super → Ultra. Every call is an OTel span with GenAI attributes and a ledger record (tokens, cost, latency, ok) → `llm_call` table via `DbLedger`, including failed calls.
+- **Reasoning hygiene**: `enable_thinking=false` via `chat_template_kwargs` (how vLLM serves Nemotron 3; reasoning is otherwise split with `<think>` tags) → strip `<think>` blocks → detect untagged reasoning ("Here's a thinking process", "The user is asking…") → retry with a `/no_think` system message → fall back a tier. A 400/422 on the kwargs style is remembered per model (Issue #22).
+- **`app/graphs/clinicdesk.py`**: first LangGraph workflow: `intent` (Lightning) → `tools` (Lightning picks read-only tools, up to 4 rounds, parallel calls) → `respond` (Super, told to state only facts in TOOL RESULTS, in the patient's language) → END. Smalltalk skips tools. Model outage → safe "clinic staff will help" reply.
+- **`python -m app.cli_chat`**: terminal chat on the demo clinic, showing per-turn models, latency and cost.
+- **`scripts/check_reasoning.py`**: tests the three reasoning switches per model and times Hindi/Kannada.
+- `/` answers HEAD (Render's probe logged `HEAD / 405`).
+- Defaults for model IDs and prices in code (Issue #21); prices unverified (Issue #23).
+
+Tests: **156 passed** on SQLite and Postgres (24 new: router config, cost, reasoning cleanup, retries, fallbacks, rejected switch, DB ledger; graph answers from tools only, smalltalk, write tools blocked, outage).
+
+End-to-end with the real OpenAI SDK against a local fake server:
+```
+you> What are Dr. Rao's timings and fee?
+desk> Dr. Rao: 09:00-13:00 and 17:00-20:00, Mon-Sat. New consultation ₹500.
+      [intent=info lang=en tools=get_clinic_info]
+      [lightning 48ms · lightning 5ms · lightning 4ms · super 3ms | total 0.1s | $0.00021]
+request bodies: {"model": "nvidia/Nemotron-3_5-Lightning", "chat_template_kwargs": {"enable_thinking": false}, "tool_choice": "auto"} …
+ledger: [('lightning','intent',400,40,3.36e-05), ('lightning','tool_selection',…), ('lightning','tool_selection',…), ('super','reply',400,40,0.000112)]
+```
+
+Problems found while building:
+- Render container lacks `config/` → Issue #21 (fixed before it shipped).
+- Possible 400 on the reasoning switch / JSON mode → Issue #22 (made defensive).
+- Prices unverified → Issue #23.
+
+Next (needs the real key, on the laptop): `py scripts/check_reasoning.py` and `py -m app.cli_chat`; results go here and decide Issues #2 and #3.
 
 ---
 
