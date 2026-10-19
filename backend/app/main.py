@@ -31,6 +31,9 @@ async def lifespan(app: FastAPI):
             FastAPIInstrumentor.instrument_app(app, excluded_urls="health,ping")
         except Exception:  # noqa: BLE001
             pass
+    if s.app_env != "test":
+        from app.guardrails import engine_name
+        engine_name()                      # load NeMo Guardrails now, not on the first patient message
     yield
 
 
@@ -74,7 +77,13 @@ def health() -> dict:
         "env": s.app_env,
         "db": "ok" if db.ping() else "down",
         "token_factory_key": "set" if s.token_factory_api_key else "missing",
+        "guardrails": _guardrails_engine(),
     }
+
+
+def _guardrails_engine() -> str:
+    from app.guardrails import engine_name
+    return "nemo-guardrails" if engine_name() == "nemo" else "direct"
 
 
 @app.get("/debug/trace")

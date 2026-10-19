@@ -21,9 +21,9 @@ _KN_SCRIPT = re.compile(r"[ಀ-೿]")
 _HI_SCRIPT = re.compile(r"[ऀ-ॿ]")
 _KN_WORDS = re.compile(r"\b(beku|bekagide|naale|nale|ivattu|jothe|nanna|nange|hesaru|illa|ide|idhe|madi|maadi|"
                        r"howdu|houdu|sari|yenu|enu|elli|yavaga|banni|baruttini|appointment\s+beku|vayassu|"
-                       r"mane|doctoru|beda|gottilla|swalpa|tumba|hege|yaake)\b", re.I)
+                       r"mane|doctoru|beda|gottilla|swalpa|tumba|hege|yaake|novu|aagtide|aagthide)\b", re.I)
 _HI_WORDS = re.compile(r"\b(chahiye|chahie|mujhe|mera|meri|naam|kal|aaj|hai|hain|kya|kab|kaise|ke\s+saath|"
-                       r"karna|karni|nahi|nahin|haan|ji|bataiye|batao|saal|umar|subah|shaam|dopahar|accha|theek)\b",
+                       r"karna|karni|nahi|nahin|haan|ji|bataiye|batao|saal|umar|subah|shaam|dopahar|accha|theek|mein|dard|ho\s+raha)\b",
                        re.I)
 _EN_WORDS = re.compile(r"\b(i|i'm|my|the|want|would|like|please|is|am|can|book|need|tomorrow|today|with|"
                        r"appointment|time|slot|name|phone|mobile|thanks|thank|you|yes|no)\b", re.I)

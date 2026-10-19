@@ -76,6 +76,24 @@ docker compose -f deploy/docker-compose.yml up --build
 # Visit http://localhost:8000/debug/trace, then find the span in Jaeger (phone numbers are redacted)
 ```
 
+## Guardrails
+
+Every patient message passes **input rails** before anything else runs, and every model-written reply
+passes an **output rail**. The policy is defined in NVIDIA NeMo Guardrails (Colang, `backend/app/guardrails/config/`);
+the checks are deterministic actions, so they work even when the model provider is down.
+
+| Rail | Catches | What the patient gets |
+|---|---|---|
+| Emergency (en/hi/kn) | chest pain, breathing trouble, stroke signs, unconsciousness, heavy bleeding, poisoning, seizures, self-harm | 108 / 112 (Tele-MANAS 14416 for self-harm) + staff alerted; "not urgent" resumes the booking |
+| Prompt injection | "ignore previous instructions", fake system tags, "developer mode"… | "I can only help with appointments at this clinic." |
+| Other patients | lists of patients, someone else's details or appointments | "Sorry, I can't share other patients' details." |
+| Medical advice | which medicine / dose, "is it serious", diagnosis | refusal + offer to book (booking continues if one is in progress) |
+| Output facts | medical advice, phone numbers, fees or times not in the tool results | reply rewritten once, then a safe fallback |
+
+Asking for a person hands over to staff with a 2-line note written by Nemotron Ultra. Every decision is
+logged in `guardrail_event` (no patient text). `/health` shows which engine is running (`nemo-guardrails`
+in the container; on Python 3.14, where NeMo isn't available yet, the same checks run directly).
+
 ## Try the live agent
 
 Open `https://clinicdesk-api.onrender.com/docs`:

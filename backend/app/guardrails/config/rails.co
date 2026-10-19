@@ -1,0 +1,27 @@
+# Input rails run in order; the first one that blocks stops the rest.
+
+define flow clinicdesk emergency screen
+  $verdict = execute screen_emergency(text=$user_message)
+  if $verdict != "ok"
+    stop
+
+define flow clinicdesk injection screen
+  $verdict = execute screen_injection(text=$user_message)
+  if $verdict != "ok"
+    stop
+
+define flow clinicdesk privacy screen
+  $verdict = execute screen_privacy(text=$user_message)
+  if $verdict != "ok"
+    stop
+
+define flow clinicdesk medical advice screen
+  $verdict = execute screen_medical(text=$user_message)
+  if $verdict != "ok"
+    stop
+
+# Output rail: facts check on model-written replies.
+define flow clinicdesk output screen
+  $verdict = execute screen_output(text=$bot_message)
+  if $verdict != "ok"
+    stop

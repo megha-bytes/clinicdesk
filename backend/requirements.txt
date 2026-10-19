@@ -8,6 +8,7 @@ openai>=1.40
 langgraph>=1.0
 langgraph-checkpoint-sqlite>=3.0
 langgraph-checkpoint-postgres>=3.0
+nemoguardrails==0.24.1 ; python_version < "3.14"   # NVIDIA NeMo Guardrails (not yet on 3.14; same checks run directly there)
 python-dotenv>=1.0
 pyyaml>=6.0
 tzdata>=2024.1          # timezone data for Windows (no system tz database there)

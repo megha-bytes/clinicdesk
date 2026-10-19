@@ -42,6 +42,7 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 33 | Replies too long for a phone call (user feedback) | Oct 19 | ✅ Fixed | Templates of 1–2 short lines; options list only when new; consent ≤ 30 words; other replies ≤ 2 sentences / 40 words |
 | 34 | Model invented `option: 1` from "I'm ehnas, my mobile is 7896578678" → "Got it: 9:50 AM" though no option was picked | Oct 19 | ✅ Fixed | Option numbers from the model are used only if the message itself says that number or an ordinal (first/pehla/ಮೊದಲ…) |
 | 35 | Reply language flipped mid-conversation: romanised Kannada read as Hindi; a bare phone number or "23" switched back to Hindi; consent shown in Hindi to a Kannada speaker | Oct 19 | ✅ Fixed | `language.py`: explicit request → script → romanised keywords → keep the conversation's language |
+| 36 | NeMo Guardrails 0.24.1 requires Python < 3.14; laptop runs 3.14 | Oct 19 | ⏸ Accepted | Installed only on < 3.14 (container 3.12, CI 3.12). Same actions run directly on 3.14; tests cover both engines. Optional: install Python 3.13 locally |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -495,6 +496,35 @@ Fix: `app/graphs/language.py` decides the reply language in order: explicit requ
 vs chahiye, mujhe, kal, naam…) → otherwise keep the conversation's language (a clear English sentence
 switches to English). The model's guess is used only for the first message when nothing else decides.
 Tests: 14 new (incl. a replay of this conversation, consent shown in Kannada). **211 passed**.
+
+### 2026-10-19 (late) · Day 9: input and output guardrails (NVIDIA NeMo Guardrails)
+
+Spike first: NeMo Guardrails 0.24.1 with `models: []` and custom actions runs input/output rails without
+any LLM or embeddings: init 0.12 s, process RSS ~68 MB (fits Render free 512 MB). It needs Python < 3.14.
+
+Built:
+- `app/guardrails/config/` (config.yml + rails.co): input rails emergency → injection → other patients →
+  medical advice; output rail "facts". Actions in `screens.py`; deterministic patterns in `rules.py`
+  (English, romanised Hindi/Kannada, Devanagari, Kannada script).
+- Runner: NeMo `LLMRails.generate(options={"rails": ["input"|"output"]})`, verdict read from the
+  activated-rails log; direct runner with the same actions/order when NeMo isn't installed.
+- Graph: `understand → guard_in → (respond | handoff | flow | agent)`. Emergency → `raise_emergency_alert`
+  (staff alert + conversation flag) and a short reply with 108/112 (self-harm: Tele-MANAS 14416);
+  "not urgent" resumes the request. Medical question during a booking → refusal line + booking continues.
+  Injection / other patients → fixed refusal; the agent never runs.
+- Extraction now also returns `emergency` and `medical_question` flags; a model flag alone triggers the
+  emergency rail (bias to safety), but rules alone are enough when the model is down.
+- Output rail on model-written replies: medical advice, phone numbers, fees not in the facts (plus the
+  earlier time/false-claim/id checks) → rewrite once → safe fallback. Every block logged in `guardrail_event`.
+- Handoff: Nemotron **Ultra** writes a 2-line note for staff (phone numbers scrubbed) → `handoff_to_staff`.
+- `/health` reports the guardrail engine; NeMo is loaded at startup.
+
+Tests: **319 passed** on SQLite and Postgres; every guardrail test runs on both engines (NeMo and direct),
+incl. 16 emergencies in 3 languages, model-down emergency, "not urgent" resume, refusals that never reach
+the agent, Ultra handoff, output medical advice replaced.
+
+Plan check (Day 9 "Done when"): ✅ emergency caught in all 3 languages even if the model is down ·
+✅ an invented time/fee never reaches the patient.
 
 ---
 

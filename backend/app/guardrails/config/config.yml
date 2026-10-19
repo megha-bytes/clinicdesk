@@ -1,0 +1,14 @@
+# NVIDIA NeMo Guardrails configuration for ClinicDesk.
+# The rails call deterministic actions (app/guardrails/screens.py), so they need no LLM of their own
+# and keep working when the model provider is down. Replies are produced by the LangGraph workflow.
+models: []
+rails:
+  input:
+    flows:
+      - clinicdesk emergency screen
+      - clinicdesk injection screen
+      - clinicdesk privacy screen
+      - clinicdesk medical advice screen
+  output:
+    flows:
+      - clinicdesk output screen

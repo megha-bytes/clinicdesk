@@ -43,6 +43,9 @@ from app.agent.models import ModelRouter, ModelUnavailable
 from app.agent.tools import ToolContext, appt_summary, label, openai_tool_specs, parse_start, run_tool
 from app.graphs.booking_flow import flow_active, render, run_flow, unverified_times
 from app.graphs.language import detect as detect_language
+from app.guardrails import check_input, check_output
+from app.guardrails.messages import msg as guard_msg
+from app.guardrails.rules import NOT_URGENT
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +68,9 @@ Return ONLY a JSON object with these keys (null when the patient didn't say it i
  "doctor": doctor name as said, "need": reason for the visit in a few words,
  "date": "today" | "tomorrow" | "YYYY-MM-DD", "time": "HH:MM" (24h), "window": "morning" | "afternoon" | "evening",
  "name": patient's name, "age": number, "phone": digits exactly as typed, "new_patient": true | false,
- "follow_up": true | false, "option": number of the option they picked}}
+ "follow_up": true | false, "option": number of the option they picked,
+ "emergency": true if they describe a medical emergency happening now, else false,
+ "medical_question": true if they ask for medical advice, a diagnosis or which medicine/dose to take, else false}}
 - info: timings, fees, doctors, address questions
 - book / reschedule / cancel / queue (token or wait time) / pay
 - human: wants to talk to a person
@@ -124,6 +129,11 @@ class State(TypedDict, total=False):
     booking: dict                # booking in progress: doctor, date, details, offered options, chosen
     in_flow: bool                # this turn is handled by the deterministic booking flow
     say: dict | None             # what the booking flow needs the reply to contain
+    guard: dict | None           # input guardrail verdict for this turn
+    prefix: str | None           # a guardrail line to put before the reply (e.g. no medical advice)
+    reply_override: str | None   # a fixed reply (emergency, refusal, handoff)
+    handoff_summary: str | None
+    held_ext: dict | None        # the request made together with an emergency warning
     hold_id: str | None          # an active hold waiting to be booked
     rounds: int
     reply: str
@@ -259,6 +269,26 @@ def _reply_problem(reply: str, results: list[dict], allowed: str) -> str | None:
     return None
 
 
+HANDOFF_PROMPT = """Write a note of at most 2 short lines for the clinic receptionist who will call this patient back:
+what they want and any details they gave (name, doctor, preferred day/time). No medical opinions, no phone numbers."""
+
+
+def rules_scrub_phone(text: str) -> str:
+    from app.guardrails.rules import PHONE_OUT
+    return PHONE_OUT.sub("[phone]", text)
+
+
+def _log_event(ctx: ToolContext, state: dict, rail: str | None, kind: str, outcome: str, detail: str) -> None:
+    """Record a guardrail decision (PII-free: rail, type, outcome and a short reason)."""
+    try:
+        ctx.session.add(m.GuardrailEvent(conversation_id=state.get("conversation_id"), rail=(rail or "guard")[:50],
+                                         type=kind[:20], outcome=outcome, detail=(detail or "")[:200]))
+        ctx.session.commit()
+    except Exception:  # noqa: BLE001 - logging must never break a reply
+        ctx.session.rollback()
+        log.exception("could not record guardrail event")
+
+
 def _public_result(result: dict) -> dict:
     """Tool result without internal ids, for the reply writer."""
     if not isinstance(result, dict):
@@ -310,9 +340,15 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
             data = _parse_json(res.content)
         except ModelUnavailable:
             data = {}
+        held = state.get("held_ext")
+        if held and NOT_URGENT.search(user):                  # "not urgent" after an emergency warning
+            data = {**held, **{k: v for k, v in data.items() if v not in (None, False, "")}}
+            if data.get("intent") in (None, "smalltalk", "other", "info"):
+                data["intent"] = held.get("intent")
         it = data.get("intent") if data.get("intent") in INTENTS else "info"
         lang = detect_language(user, data.get("language"), state.get("language"))   # sticky (DEVLOG #35)
-        upd = {"intent": it, "language": lang, "ext": data, "say": None,
+        upd = {"intent": it, "language": lang, "ext": data, "say": None, "guard": None, "prefix": None,
+               "reply_override": None, "held_ext": None,
                # a new patient turn: clear this turn's working memory
                "scratch": [], "tool_results": [], "rounds": 0, "pending": None}
         upd["in_flow"] = flow_active({**state, **upd})
@@ -442,6 +478,48 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
                                                           "result": out}],
                 "patient_id": patient_id, "pending": None}
 
+    def guard_in(state: State, ctx: ToolContext) -> State:
+        """Input rails (NeMo Guardrails): emergency → injection → other patients → medical advice."""
+        user = next((x["content"] for x in reversed(state["messages"]) if x["role"] == "user"), "")
+        ext = state.get("ext") or {}
+        v = check_input(user, model_emergency=bool(ext.get("emergency")), model_medical=bool(ext.get("medical_question")))
+        if v.ok:
+            return {"guard": None}
+        if v.kind != "emergency":                              # emergencies are logged by raise_emergency_alert
+            _log_event(ctx, state, v.rail, v.kind, "block", v.detail or v.kind)
+        lang = state.get("language", "en")
+        upd: dict = {"guard": {"kind": v.kind, "rail": v.rail, "detail": v.detail, "engine": v.engine}}
+        if v.kind == "emergency":
+            out = run_tool("raise_emergency_alert", {"summary": f"emergency screen: {v.detail}"}, ctx, allow_hidden=True)
+            numbers = out.get("numbers") if out.get("ok") else None
+            upd["reply_override"] = guard_msg("self_harm" if v.detail == "self_harm" else "emergency", lang, numbers)
+            upd["tool_results"] = [{"tool": "raise_emergency_alert", "args": {}, "result": {"ok": out.get("ok")}}]
+            upd["held_ext"] = {**ext, "intent": state.get("intent")}        # resume this request after "not urgent"
+        elif v.kind == "medical" and state.get("in_flow"):
+            upd["prefix"] = guard_msg("medical", lang)                 # refuse the advice, keep booking
+        elif v.kind == "medical":
+            upd["reply_override"] = guard_msg("medical", lang) + " " + guard_msg("offer_booking", lang)
+        else:
+            upd["reply_override"] = guard_msg(v.kind, lang)
+        return upd
+
+    def handoff(state: State, ctx: ToolContext) -> State:
+        """Patient wants a person: Ultra writes a short note for the staff, then hand over."""
+        convo = [x for x in state["messages"][-10:] if x["role"] in ("user", "assistant")]
+        summary = ""
+        try:
+            res = router.chat("ultra", [{"role": "system", "content": HANDOFF_PROMPT}, *convo], purpose="handoff_summary",
+                              node="handoff", conversation_id=state.get("conversation_id"), max_tokens=200, temperature=0)
+            summary = scrub_ids(rules_scrub_phone(res.content or ""))[:600]
+        except ModelUnavailable:
+            pass
+        if not summary:
+            summary = " | ".join(x["content"][:120] for x in convo if x["role"] == "user")[-600:]
+        out = run_tool("handoff_to_staff", {"reason": "patient asked for a person", "summary": summary}, ctx)
+        reply = guard_msg("handoff", state.get("language", "en"))
+        return {"reply_override": reply, "tool_results": [{"tool": "handoff_to_staff", "args": {}, "result": out}],
+                "handoff_summary": summary}
+
     def flow(state: State, ctx: ToolContext) -> State:
         upd = run_flow(state, ctx)
         p = upd.get("pending")
@@ -457,9 +535,14 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
 
     def respond(state: State, ctx: ToolContext) -> State:
         results = state.get("tool_results", [])
+        if state.get("reply_override"):                       # guardrail or handoff reply (templates)
+            reply = state["reply_override"]
+            return {"reply": reply, "reply_override": None, "messages": [{"role": "assistant", "content": reply}]}
         say = state.get("say")
         if say is not None:                                   # booking step: templates, no model (DEVLOG #32)
             reply = render(say, state.get("language", "en"))
+            if state.get("prefix"):
+                reply = state["prefix"] + "\n" + reply
             return {"reply": reply, "messages": [{"role": "assistant", "content": reply}]}
         lang_name = LANG_NAMES.get(state.get("language", "en"), "English")
         user = next((x["content"] for x in reversed(state["messages"]) if x["role"] == "user"), "")
@@ -479,19 +562,31 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
                 break
             problem = _reply_problem(reply, results, allowed)
             if not problem:
+                ov = check_output(reply, allowed)                  # output rail (NeMo Guardrails)
+                if not ov.ok:
+                    _log_event(ctx, state, ov.rail, ov.kind, "block", ov.detail)
+                    problem = (f"Your reply was blocked ({ov.detail}). Rewrite it without that; "
+                               "never give medical advice; use only facts from TOOL RESULTS.")
+            if not problem:
                 break
             log.warning("reply rejected (%s); regenerating", problem)
             msgs = [*msgs, {"role": "assistant", "content": reply}, {"role": "system", "content": problem}]
         else:
-            if _reply_problem(reply, results, allowed):
-                reply = "I haven't booked anything yet. Shall I check the available times for you?"
+            if _reply_problem(reply, results, allowed) or not check_output(reply, allowed).ok:
+                reply = "Sorry, I can't answer that here. Our clinic staff can help, or I can book you an appointment."
         reply = shorten(scrub_ids(reply))
         if not reply:
             reply = "Sorry, I'm having trouble right now. Our clinic staff will help you shortly."
+        if state.get("prefix"):
+            reply = state["prefix"] + " " + reply
         return {"reply": reply, "messages": [{"role": "assistant", "content": reply}]}
 
     # ---------------------------------------------------------------- edges
-    def after_intent(state: State) -> str:
+    def after_guard(state: State) -> str:
+        if state.get("reply_override"):
+            return "respond"
+        if state.get("intent") == "human":
+            return "handoff"
         if state.get("in_flow"):
             return "flow"
         if state.get("intent") in DATA_INTENTS or state.get("hold_id"):
@@ -516,11 +611,15 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         return "agent" if state.get("rounds", 0) < MAX_TOOL_ROUNDS else "respond"
 
     g = StateGraph(State)
-    for name, fn in (("intent", intent), ("flow", with_ctx(flow)), ("agent", with_ctx(agent)), ("tools", with_ctx(tools)),
+    for name, fn in (("intent", intent), ("guard_in", with_ctx(guard_in)), ("handoff", with_ctx(handoff)),
+                     ("flow", with_ctx(flow)), ("agent", with_ctx(agent)), ("tools", with_ctx(tools)),
                      ("confirm", confirm), ("execute", with_ctx(execute)), ("respond", with_ctx(respond))):
         g.add_node(name, fn)
     g.add_edge(START, "intent")
-    g.add_conditional_edges("intent", after_intent, {"flow": "flow", "agent": "agent", "respond": "respond"})
+    g.add_edge("intent", "guard_in")
+    g.add_conditional_edges("guard_in", after_guard, {"flow": "flow", "agent": "agent", "respond": "respond",
+                                                      "handoff": "handoff"})
+    g.add_edge("handoff", "respond")
     g.add_conditional_edges("flow", after_flow, {"confirm": "confirm", "respond": "respond"})
     g.add_conditional_edges("agent", after_agent, {"tools": "tools", "respond": "respond"})
     g.add_conditional_edges("tools", after_tools, {"confirm": "confirm", "agent": "agent", "respond": "respond"})
