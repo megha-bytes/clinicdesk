@@ -38,6 +38,8 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 29 | Models still invent availability without tools (Nano: "not available", Super: "9:00 available" for the same question) | Oct 19 | 🔴 Open | Day 9 verified-facts output check |
 | 30 | Reply language drifts: Super answers Hindi in Latin script; Lightning mixes English into Kannada | Oct 19 | 🔴 Open | Day 9: reply in the patient's script; check script of output |
 | 31 | Second live booking still failed: 11-digit phone ignored ("noted"), reply writer invented tool calls and slots (year 2024), agent looped 9 calls on "3", patient asked to type "confirm" repeatedly | Oct 19 | ✅ Fixed | Bookings now a deterministic flow (`booking_flow.py`); model only extracts; options and confirmations shown verbatim; time check on replies |
+| 32 | Third live run (8:38 pm): "Nothing is free" for 5 turns (model filled date="today" after hours); picking "12:05 am" re-searched and lost the list; reply writer said invalid phone "looks good", wrote "[date] at [time]" placeholders and "one moment while I check" | Oct 19 | ✅ Fixed | Dates only if the patient said one; requested day → next days fallback; pick before re-search; booking replies from templates (no model) |
+| 33 | Replies too long for a phone call (user feedback) | Oct 19 | ✅ Fixed | Templates of 1–2 short lines; options list only when new; consent ≤ 30 words; other replies ≤ 2 sentences / 40 words |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -406,6 +408,52 @@ Change: **"the model understands, the workflow decides."**
 Effect: a booking turn is now 2 model calls (≈2–3 s) instead of up to 10 (7 s).
 Tests: **190 passed** on SQLite and Postgres (new `test_booking_flow.py` replays this transcript: 11-digit
 phone, "3" classified as info, invented times, wrong year).
+
+### 2026-10-19 (evening) · Third live run → template replies, short and crisp
+
+Live run with patch 07 at 8:38 pm (real Nemotron), summary:
+```
+you>  Hi, I want to book an appointment with Rao
+desk> Hello! Nothing is free then—would another day or time work? ...       ← clinic closed; only "today" searched
+you>  My name is megh and phone number is 2345637389                        ← not a mobile number (starts with 2)
+desk> Thank you, Megh! Your phone number looks good...                      ← reply writer ignored the problem
+you>  afternoon please / yes?
+desk> ...options for Dr. Rao on [date] at [time] and again on [next date] at [time]   ← placeholders
+you>  I cannot see any dates
+desk> 1. Dr. Ananya Rao · Tue 20 Oct, 12:05 PM ... (finally; model left date empty this time)
+you>  I would like the 12:05 am slot thanks
+desk> (options re-fetched, list changed: 9:50 → 10:10)                       ← "12:05" read as a new time
+```
+Causes: (1) the extraction filled `date: "today"` although no date was said; at 8:38 pm today is over and
+only one day was searched; (2) a time in the message was treated as a new preference before checking
+whether it picked an option; (3) the reply writer still improvises around the facts.
+
+Fixes (patch 08):
+- A date is used only if the message mentions one (today/aaj/ಇಂದು, tomorrow/kal/ನಾಳೆ, digits, month or
+  weekday names). Requested day full → search the next 3 days and say "Dr. X is full on Mon 19 Oct."
+- The option pick is checked first; "the 12:05 am one" matches a 12:05 PM option.
+- Phone check says what's wrong: wrong length, or "isn't a mobile number" (Indian mobiles start 6–9).
+- **Booking replies come from templates (en/hi/kn), no model.** A booking turn is now 1 model call.
+- **Short and crisp (user request, #33)**: e.g. `Free with Dr. Ananya Rao (₹500): 1. Tue 20 Oct, 9:50 AM …
+  Reply with a number. Your name and mobile number?`; the options list is shown only when new; consent
+  notice cut to ≤ 30 words (en/hi/kn); model-written replies capped at 2 sentences / 40 words, no markdown.
+
+Simulated replay of the same conversation after the fix:
+```
+you>  Hi, I want to book an appointment with Rao
+desk> Free with Dr. Ananya Rao (₹500):
+      1. Tue 20 Oct, 9:50 AM / 2. Tue 20 Oct, 11:45 AM / 3. Tue 20 Oct, 12:15 PM
+      Reply with a number.
+      Your name and mobile number?
+you>  My name is megh and phone number is 2345637389
+desk> 2345637389 isn't a mobile number; please check.
+you>  sorry 9823461744
+desk> First visit? Your age, please.
+you>  23
+desk> [CONSENT] We'll save your name, age and phone only for your appointments at Sunrise Family Clinic. ...OK?
+```
+Tests: **196 passed** on SQLite and Postgres (evening/no-date, full-day fallback, am/pm pick, invalid
+mobile, Hindi template, reply length).
 
 ---
 

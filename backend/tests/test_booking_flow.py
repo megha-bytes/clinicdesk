@@ -1,4 +1,4 @@
-"""Deterministic booking flow (DEVLOG #31): the model only extracts details; code makes every decision.
+"""Deterministic booking flow (DEVLOG #31, #32): the model only extracts details; code decides; templates reply.
 
 The fake "understand" step returns whatever extraction a test gives it, including the kinds of
 mistakes the real model made in live runs (wrong year, intent "info" for "3", 11-digit phone).
@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from app import models as m
 from app.agent.models import MemoryLedger, ModelRouter, load_tiers
 from app.agent.tools import ToolContext
-from app.graphs.booking_flow import clean_date, merge_details, pick_option, unverified_times
+from app.graphs.booking_flow import clean_date, merge_details, pick_option, render, unverified_times
 from app.graphs.clinicdesk import answer, build_graph, pending_interrupt, send
 from app.seed import seed
 from tests.fakes import FakeClient, msg
@@ -48,10 +48,10 @@ class Fake:
         return msg(self.reply(len(self.steps)) if callable(self.reply) else self.reply)
 
 
-def graph_for(session, clinic_id, fake, checkpointer=None):
+def graph_for(session, clinic_id, fake, checkpointer=None, now=NOW):
     ledger = MemoryLedger()
     router = ModelRouter(FakeClient(fake), tiers=load_tiers(), ledger=ledger)
-    return build_graph(router, lambda: ToolContext(session=session, clinic_id=clinic_id, now=NOW), checkpointer), ledger
+    return build_graph(router, lambda: ToolContext(session=session, clinic_id=clinic_id, now=now), checkpointer), ledger
 
 
 NEHA = "Book Dr. Rao tomorrow. New patient Neha Rao, 30, 9123456789"
@@ -72,22 +72,22 @@ def test_new_patient_books_end_to_end(session, clinic):
 
     out = answer(g, "t", "yes")
     assert out["interrupt"] is None
-    assert "1. Dr. Ananya Rao · Tue 13 Oct" in out["reply"] and "Reply with the option number." in out["reply"]
-    option2 = out["reply"].split("2. ", 1)[1].split("\n")[0]
-    when = option2.split(" · ")[1]
+    assert "Free with Dr. Ananya Rao (₹500):\n1. Tue 13 Oct" in out["reply"] and "Reply with a number." in out["reply"]
+    when = out["reply"].split("2. ", 1)[1].split("\n")[0]
 
     out = send(g, "t", "2")
     q = out["interrupt"]
     assert q["kind"] == "confirm" and when in q["summary"] and "₹500" in q["summary"]
 
     out = answer(g, "t", "yes")
-    assert f"✅ Booked: Dr. Ananya Rao · {when} · ₹500" in out["reply"] and "Pay here: " in out["reply"]
+    assert f"✅ Booked: Dr. Ananya Rao, {when}, ₹500." in out["reply"] and "Pay: " in out["reply"]
+    assert len(out["reply"].split()) < 20                                  # phone-sized
     p = session.scalar(select(m.Patient).where(m.Patient.phone == "9123456789"))
     appt = session.scalar(select(m.Appointment).where(m.Appointment.patient_id == p.id))
     assert appt.status == "confirmed" and p.consent_at is not None
     assert session.scalar(select(m.Payment.amount_inr).where(m.Payment.appointment_id == appt.id)) == 500
-    assert fake.agent_calls == 0                                          # no model-driven tool calls
-    assert {r.purpose for r in ledger.records} == {"intent", "reply"}
+    assert fake.agent_calls == 0 and fake.steps == []                     # no model decides or writes
+    assert {r.purpose for r in ledger.records} == {"intent"}
 
 
 def test_live_run_replay_eleven_digit_phone(session, clinic):
@@ -100,11 +100,11 @@ def test_live_run_replay_eleven_digit_phone(session, clinic):
     })
     g, _ = graph_for(session, clinic, fake)
     out = send(g, "t", "I want an appointment with Dr. Rao")
-    assert "1. Dr. Ananya Rao" in out["reply"]                             # options straight away
-    assert set(fake.steps[-1]["ask_for"]) == {"their name", "their 10-digit mobile number"}
+    assert "Free with Dr. Ananya Rao" in out["reply"]                      # options straight away
+    assert out["reply"].endswith("Your name and mobile number?")
 
     out = send(g, "t", "I am John, my phone number is 87976545677, I am 23 years old")
-    assert "That phone number has 11 digits" in json.dumps(fake.steps[-1]) and out["interrupt"] is None
+    assert "That number has 11 digits" in out["reply"] and out["interrupt"] is None
 
     out = send(g, "t", "sorry, 9823461744")
     assert out["interrupt"]["kind"] == "consent"                           # name + age remembered
@@ -117,7 +117,7 @@ def test_existing_patient_needs_no_consent_and_can_pick_by_time(session, clinic)
     g, _ = graph_for(session, clinic, fake)
     out = send(g, "t", first)
     assert out["interrupt"] is None
-    when = out["reply"].split("1. ", 1)[1].split(" · ")[1]                  # e.g. "Tue 13 Oct, 9:20 AM"
+    when = out["reply"].split("1. ", 1)[1].split("\n")[0]                  # e.g. "Tue 13 Oct, 9:20 AM"
     clock = when.split(", ")[1]
     fake.extract[f"the {clock} one"] = {"intent": "book"}
     out = send(g, "t", f"the {clock} one")
@@ -131,7 +131,7 @@ def test_choice_before_details_goes_straight_to_the_card_after_consent(session, 
     g, _ = graph_for(session, clinic, fake)
     send(g, "t", "Dr. Rao tomorrow")
     out = send(g, "t", "1")
-    assert out["interrupt"] is None and fake.steps[-1].get("chosen")
+    assert out["interrupt"] is None and out["reply"].startswith("Got it: Tue 13 Oct")
     assert send(g, "t", "Neha Rao, 30, 9123456789")["interrupt"]["kind"] == "consent"
     q = answer(g, "t", "yes")["interrupt"]
     assert q["kind"] == "confirm" and "Dr. Ananya Rao" in q["summary"]
@@ -142,7 +142,7 @@ def test_declined_consent_stores_nothing(session, clinic):
     g, _ = graph_for(session, clinic, fake)
     send(g, "t", NEHA)
     out = answer(g, "t", "no")
-    assert out["interrupt"] is None and "staff can call you" in fake.steps[-1]["tell_them"][0]
+    assert out["interrupt"] is None and "staff can call you" in out["reply"]
     assert patients(session) == 60
 
 
@@ -153,7 +153,7 @@ def test_declined_booking_changes_nothing_and_offers_options_again(session, clin
     answer(g, "t", "yes")
     send(g, "t", "1")
     out = answer(g, "t", "no")
-    assert "1. Dr. Ananya Rao" in out["reply"]
+    assert out["reply"].startswith("OK, not booked.\nFree with Dr. Ananya Rao")
     p = session.scalar(select(m.Patient).where(m.Patient.phone == "9123456789"))
     assert "confirmed" not in session.scalars(select(m.Appointment.status).where(m.Appointment.patient_id == p.id)).all()
 
@@ -171,22 +171,66 @@ def test_paused_card_survives_a_restart(session, clinic, tmp_path):
     assert "✅ Booked" in answer(g2, "t", "yes")["reply"]
 
 
-def test_invented_times_in_the_reply_are_rejected(session, clinic):
-    """DEVLOG #31: the reply writer listed 09:00, 09:30, 10:30, 11:00, none of them real."""
-    fake = Fake({"Dr. Rao tomorrow": {"intent": "book", "doctor": "Dr. Rao", "date": "tomorrow"}},
-                reply="We have 09:00 and 09:30 free. [Tool: find_slots]")
+def test_invented_times_in_a_model_reply_are_rejected(session, clinic):
+    """Non-booking replies are still model-written; times not in the tool results are rejected."""
+    fake = Fake({"what are your timings": {"intent": "info"}}, reply="We have 09:05 and 09:35 free. [Tool: find_slots]")
+    g, _ = graph_for(session, clinic, fake)
+    out = send(g, "t", "what are your timings")
+    assert len(fake.steps) == 2 and "09:05" not in out["reply"] and "Tool" not in out["reply"]
+
+
+# ------------------------------------------------------------------ second live run (DEVLOG #32), 8:38 pm
+EVENING = datetime(2026, 10, 12, 20, 38, tzinfo=IST)
+
+
+def test_evening_without_a_date_finds_tomorrow(session, clinic):
+    """The model filled in date="today" though the patient gave none; today was over, so nothing showed."""
+    fake = Fake({"Hi, I want to book an appointment with Rao": {"intent": "book", "doctor": "Rao", "date": "today"}})
+    g, _ = graph_for(session, clinic, fake, now=EVENING)
+    out = send(g, "t", "Hi, I want to book an appointment with Rao")
+    assert "is full" not in out["reply"] and "(₹500):\n1. Tue 13 Oct" in out["reply"]
+
+
+def test_requested_day_full_falls_back_to_next_days(session, clinic):
+    fake = Fake({"Dr. Rao today please": {"intent": "book", "doctor": "Dr. Rao", "date": "today"}})
+    g, _ = graph_for(session, clinic, fake, now=EVENING)
+    out = send(g, "t", "Dr. Rao today please")
+    assert out["reply"].startswith("Dr. Ananya Rao is full on Mon 12 Oct.")
+    assert "1. Tue 13 Oct" in out["reply"]
+
+
+def test_picking_by_time_keeps_the_options_and_tolerates_am_pm(session, clinic):
+    """'I would like the 12:05 am slot' re-searched and lost the list; the slot was 12:05 PM."""
+    fake = Fake({"Dr. Rao tomorrow": {"intent": "book", "doctor": "Dr. Rao", "date": "tomorrow"}})
     g, _ = graph_for(session, clinic, fake)
     out = send(g, "t", "Dr. Rao tomorrow")
-    head = out["reply"].split("\n\n1. ")[0]
-    assert len(fake.steps) == 2 and "09:00" not in head and "Tool" not in head
-    assert head.startswith("Could you share your name")
+    first = out["reply"].split("1. ", 1)[1].split("\n")[0]                 # e.g. "Tue 13 Oct, 9:20 AM"
+    clock = first.split(", ")[1]
+    wrong = clock.replace("AM", "pm") if "AM" in clock else clock.replace("PM", "am")
+    msg_ = f"I would like the {wrong} slot thanks"
+    fake.extract[msg_] = {"intent": "book", "time": "21:20"}                # model also extracts a "new" time
+    out = send(g, "t", msg_)
+    assert f"Got it: {first}" in out["reply"]
+
+
+def test_phone_that_isnt_a_mobile_number(session, clinic):
+    fake = Fake({"My name is megh and phone number is 2345637389":
+                 {"intent": "book", "name": "megh", "phone": "2345637389"}})
+    g, _ = graph_for(session, clinic, fake)
+    out = send(g, "t", "My name is megh and phone number is 2345637389")
+    assert out["reply"].startswith("2345637389 isn't a mobile number; please check.\nWhich doctor")
+
+
+def test_hindi_booking_reply():
+    say = {"problems": [("phone_len", {"n": 11})], "ask": ["phone"], "options": None}
+    assert render(say, "hi") == "इस नंबर में 11 अंक हैं; कृपया 10 अंक भेजें।"
 
 
 def test_model_cannot_pick_a_date_in_the_past(session, clinic):
     fake = Fake({"Dr. Rao on 20 October": {"intent": "book", "doctor": "Dr. Rao", "date": "2024-10-20"}})
     g, _ = graph_for(session, clinic, fake)
     out = send(g, "t", "Dr. Rao on 20 October")
-    assert "1. Dr. Ananya Rao · Tue 20 Oct" in out["reply"]
+    assert "1. Tue 20 Oct" in out["reply"]
 
 
 def test_other_intents_still_use_the_agent(session, clinic):
@@ -209,6 +253,9 @@ def test_clean_date():
     assert clean_date("2024-10-20", Ctx) == "2026-10-20"
     assert clean_date("2026-01-05", Ctx) == "2027-01-05"
     assert clean_date("tomorrow", Ctx) == "tomorrow" and clean_date("next week", Ctx) is None
+    assert clean_date("today", Ctx, "book with Rao") is None                 # not said → not used
+    assert clean_date("today", Ctx, "aaj shaam") == "today" and clean_date("tomorrow", Ctx, "कल सुबह") == "tomorrow"
+    assert clean_date("2026-10-20", Ctx, "20th October") == "2026-10-20"
 
 
 def test_merge_details_only_keeps_what_was_typed():
@@ -217,7 +264,7 @@ def test_merge_details_only_keeps_what_was_typed():
     d, problems = merge_details({}, {}, "I'm Asha, 9123456789, 34 years")
     assert d["phone"] == "9123456789" and d["age"] == 34
     d, problems = merge_details({}, {"phone": "87976545677"}, "87976545677")
-    assert "phone" not in d and "11 digits" in problems[0]
+    assert "phone" not in d and problems == [("phone_len", {"n": 11})]
 
 
 def test_pick_option():
@@ -232,3 +279,12 @@ def test_unverified_times():
     assert unverified_times("Come at 9:20 AM", "Tue 13 Oct, 9:20 AM") == set()
     assert unverified_times("We have 09:00 free", "9:20 AM") == {(9, 0), (21, 0)}
     assert unverified_times("Thanks!", "") == set()
+
+
+def test_model_replies_are_phone_sized():
+    from app.graphs.clinicdesk import CONSENT_TEXT, shorten
+    long = ("Our clinic is open Monday to Saturday. **Dr. Rao** sees patients 9 to 1. "
+            "Please arrive early. Bring your old reports. Parking is available.")
+    out = shorten(long)
+    assert out == "Our clinic is open Monday to Saturday. Dr. Rao sees patients 9 to 1."
+    assert all(len(v.split()) <= 30 for v in CONSENT_TEXT.values())

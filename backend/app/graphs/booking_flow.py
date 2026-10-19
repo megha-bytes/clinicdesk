@@ -1,38 +1,119 @@
-"""Deterministic booking flow: the model extracts what the patient said, the code decides what happens.
+"""Deterministic booking flow: the model extracts what the patient said, the code decides what happens
+and the reply is built from templates.
 
-Why: in the first live runs (DEVLOG #27, #31) a small model driving the booking tool-by-tool skipped
-the confirmation, looped on "3", ignored an invalid phone number and the reply writer invented slots.
-Here every step is plain code over the same tools:
+Why (DEVLOG #27, #31, #32): in live runs a small model driving the booking tool-by-tool skipped the
+confirmation and looped; a reply writer told patients an invalid phone number "looks good", promised
+"one moment while I check", wrote "[date] at [time]" placeholders and invented slots. Here:
 
-    details (name, phone, age) ─┐
-    doctor / need, date, time  ─┼→ identify patient → find slots → patient picks → hold → confirmation card
-    option number / time       ─┘   (find or register,           (numbered list       (graph interrupt)
-                                     consent card once)            shown verbatim)
+    understand (Lightning) → extraction only: doctor, date, time, name, age, phone, option number
+    run_flow (code)        → typed details only → validate phone → find / register (consent card once)
+                             → search slots (requested day, then the next days) → numbered options
+                             → pick by number or time → hold → confirmation card → book → payment link
+    render (templates)     → the reply, in English / Hindi / Kannada; no model writes booking replies
 
-`run_flow` returns state updates plus `say`: what the reply must contain (questions to ask,
-patient-facing problems, options to show, the booking result). The reply writer only words it.
+Every value the patient sees in a booking reply (times, fees, doctor, token, link) comes from a tool result.
 """
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import select
 
 from app import models as m
-from app.agent.tools import ToolContext, ToolFailure, normalise_phone, run_tool
+from app.agent.tools import ToolContext, ToolFailure, normalise_phone, parse_day, run_tool
 
-ASK_TEXT = {
-    "name": "their name",
-    "phone": "their 10-digit mobile number",
-    "age": "their age (they're a new patient)",
-    "doctor": "which doctor they'd like, or what the visit is for",
-}
 _PHONE_RUN = re.compile(r"(?<!\d)(?:\+?\d[\d\s-]{7,15}\d)(?!\d)")
-_AGE = re.compile(r"\b(?:age[d]?\s*(?:is\s*)?(\d{1,3})|(\d{1,3})\s*(?:years?|yrs?|y/?o)\b)", re.I)
-_OPTION = re.compile(r"^\s*(?:option|no\.?|number|#)?\s*(\d)\s*[.)]?\s*$", re.I)
+_AGE = re.compile(r"\b(?:age[d]?\s*(?:is\s*)?(\d{1,3})|(\d{1,3})\s*(?:years?|yrs?|y/?o|saal|साल|ವರ್ಷ)\b)", re.I)
+_OPTION = re.compile(r"^\s*(?:option|no\.?|number|#)?\s*(\d)\s*[.)]?\s*(?:please|pls)?\s*$", re.I)
 _CLOCK = re.compile(r"\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?", re.I)
+_TODAY = re.compile(r"\b(today|tonight|aaj|ivattu|indu)\b|आज|ಇಂದು|ಇವತ್ತು", re.I)
+_TOMORROW = re.compile(r"\b(tomorrow|tmrw|kal|naale|nale)\b|कल|ನಾಳೆ", re.I)
+_DATEISH = re.compile(r"\d|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|mon|tue|wed|thu|fri|sat|sun|next|after|"
+                      r"parso|week)", re.I)
+_WINDOW_WORDS = {
+    "morning": re.compile(r"\b(morning|subah|subha|bellige)\b|सुबह|ಬೆಳಿಗ್ಗೆ|ಬೆಳಗ್ಗೆ", re.I),
+    "afternoon": re.compile(r"\b(afternoon|noon|dopahar|madhyahna)\b|दोपहर|ಮಧ್ಯಾಹ್ನ", re.I),
+    "evening": re.compile(r"\b(evening|shaam|sham|sanje)\b|शाम|ಸಂಜೆ", re.I),
+}
+
+# --------------------------------------------------------------------------- reply templates
+T: dict[str, dict[str, str]] = {                 # short: replies may be read aloud on a phone call
+    "welcome_back": {"en": "Welcome back, {name}!", "hi": "फिर से स्वागत है, {name}!", "kn": "ಮತ್ತೆ ಸ್ವಾಗತ, {name}!"},
+    "phone_len": {"en": "That number has {n} digits; please send 10.", "hi": "इस नंबर में {n} अंक हैं; कृपया 10 अंक भेजें।",
+                  "kn": "ಈ ಸಂಖ್ಯೆಯಲ್ಲಿ {n} ಅಂಕೆಗಳಿವೆ; ದಯವಿಟ್ಟು 10 ಕಳುಹಿಸಿ."},
+    "phone_bad": {"en": "{num} isn't a mobile number; please check.", "hi": "{num} मोबाइल नंबर नहीं है; कृपया जाँचें।",
+                  "kn": "{num} ಮೊಬೈಲ್ ಸಂಖ್ಯೆ ಅಲ್ಲ; ದಯವಿಟ್ಟು ಪರಿಶೀಲಿಸಿ."},
+    "declined_slot": {"en": "OK, not booked.", "hi": "ठीक है, बुक नहीं किया।", "kn": "ಸರಿ, ಬುಕ್ ಮಾಡಿಲ್ಲ."},
+    "declined_consent": {"en": "OK. Our staff can call you instead.", "hi": "ठीक है। हमारा स्टाफ़ आपको कॉल कर सकता है।",
+                         "kn": "ಸರಿ. ನಮ್ಮ ಸಿಬ್ಬಂದಿ ನಿಮಗೆ ಕರೆ ಮಾಡಬಹುದು."},
+    "nothing_day": {"en": "{who} is full on {day}.", "hi": "{day} को {who} खाली नहीं हैं।", "kn": "{day} ರಂದು {who} ಖಾಲಿ ಇಲ್ಲ."},
+    "nothing_at_all": {"en": "{who} is full this week. Our staff will call you.",
+                       "hi": "इस हफ़्ते {who} खाली नहीं हैं। स्टाफ़ आपको कॉल करेगा।",
+                       "kn": "ಈ ವಾರ {who} ಖಾಲಿ ಇಲ್ಲ. ಸಿಬ್ಬಂದಿ ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ."},
+    "taken": {"en": "Sorry, that slot just went.", "hi": "माफ़ कीजिए, वह समय अभी भर गया।", "kn": "ಕ್ಷಮಿಸಿ, ಆ ಸಮಯ ಈಗಷ್ಟೇ ಹೋಯಿತು."},
+    "past": {"en": "That date has passed.", "hi": "वह तारीख़ निकल चुकी है।", "kn": "ಆ ದಿನಾಂಕ ಕಳೆದಿದೆ."},
+    "error": {"en": "Sorry, that didn't work. Our staff can help.", "hi": "माफ़ कीजिए, यह नहीं हुआ। स्टाफ़ मदद करेगा।",
+              "kn": "ಕ್ಷಮಿಸಿ, ಆಗಲಿಲ್ಲ. ಸಿಬ್ಬಂದಿ ಸಹಾಯ ಮಾಡುತ್ತಾರೆ."},
+    "options": {"en": "Free with {who}{fee}:", "hi": "{who}{fee} के खाली समय:", "kn": "{who}{fee} ಖಾಲಿ ಸಮಯ:"},
+    "pick": {"en": "Reply with a number.", "hi": "नंबर भेजें।", "kn": "ಸಂಖ್ಯೆ ಕಳುಹಿಸಿ."},
+    "chosen": {"en": "Got it: {label}.", "hi": "ठीक है: {label}।", "kn": "ಸರಿ: {label}."},
+    "ask_name_phone": {"en": "Your name and mobile number?", "hi": "आपका नाम और मोबाइल नंबर?", "kn": "ನಿಮ್ಮ ಹೆಸರು ಮತ್ತು ಮೊಬೈಲ್ ಸಂಖ್ಯೆ?"},
+    "ask_name": {"en": "Your name?", "hi": "आपका नाम?", "kn": "ನಿಮ್ಮ ಹೆಸರು?"},
+    "ask_phone": {"en": "Your 10-digit mobile number?", "hi": "आपका 10 अंकों का मोबाइल नंबर?", "kn": "ನಿಮ್ಮ 10 ಅಂಕೆಯ ಮೊಬೈಲ್ ಸಂಖ್ಯೆ?"},
+    "ask_age": {"en": "First visit? Your age, please.", "hi": "पहली बार? अपनी उम्र बताइए।", "kn": "ಮೊದಲ ಭೇಟಿಯೇ? ನಿಮ್ಮ ವಯಸ್ಸು ತಿಳಿಸಿ."},
+    "ask_doctor": {"en": "Which doctor, or what's it for?", "hi": "कौन से डॉक्टर, या किस लिए?", "kn": "ಯಾವ ವೈದ್ಯರು, ಅಥವಾ ಯಾವ ಕಾರಣಕ್ಕೆ?"},
+    "booked": {"en": "✅ Booked: {doctor}, {when}, ₹{fee}.", "hi": "✅ बुक: {doctor}, {when}, ₹{fee}।",
+               "kn": "✅ ಬುಕ್ ಆಗಿದೆ: {doctor}, {when}, ₹{fee}."},
+    "pay": {"en": "Pay: {url}", "hi": "भुगतान: {url}", "kn": "ಪಾವತಿ: {url}"},
+}
+
+
+def t(key: str, lang: str, **kw: Any) -> str:
+    row = T[key]
+    return row.get(lang, row["en"]).format(**kw)
+
+
+def render(say: dict, lang: str) -> str:
+    """The patient-facing reply for one booking step."""
+    lines: list[str] = []
+    if say.get("welcome"):
+        lines.append(t("welcome_back", lang, name=say["welcome"]))
+    for key, kw in say.get("problems", []):
+        lines.append(t(key, lang, **kw))
+    if say.get("booked"):
+        b = say["booked"]
+        lines.append(t("booked", lang, doctor=b["doctor"], when=b["when"], fee=b["fee_inr"]))
+        if b.get("pay_url"):
+            lines.append(t("pay", lang, url=b["pay_url"]))
+    if say.get("chosen"):
+        lines.append(t("chosen", lang, label=say["chosen"]))
+    if say.get("options"):
+        opts = say["options"]
+        same_doc = len({o["doctor"] for o in opts if "doctor" in o}) == 1 and all("doctor" in o for o in opts)
+        same_fee = len({o.get("fee_inr") for o in opts}) == 1 and opts[0].get("fee_inr") is not None
+        who = opts[0]["doctor"] if same_doc else say.get("who", "")
+        lines.append(t("options", lang, who=who, fee=f" (₹{opts[0]['fee_inr']})" if same_fee else ""))
+        for i, o in enumerate(opts, 1):
+            parts = [] if same_doc else [o.get("doctor", "")]
+            parts.append(o.get("short", o["label"]))
+            if not same_fee and o.get("fee_inr") is not None:
+                parts.append(f"₹{o['fee_inr']}")
+            lines.append(f"{i}. " + " · ".join(p for p in parts if p))
+        lines.append(t("pick", lang))
+    ask = say.get("ask", [])
+    if "name" in ask and "phone" in ask:
+        lines.append(t("ask_name_phone", lang))
+    elif "name" in ask:
+        lines.append(t("ask_name", lang))
+    elif "phone" in ask and not any(k.startswith("phone_") for k, _ in say.get("problems", [])):
+        lines.append(t("ask_phone", lang))
+    if "age" in ask:
+        lines.append(t("ask_age", lang))
+    if "doctor" in ask:
+        lines.append(t("ask_doctor", lang))
+    return "\n".join(lines) or t("ask_doctor", lang)
 
 
 def _digits(text: str | None) -> str:
@@ -40,21 +121,25 @@ def _digits(text: str | None) -> str:
 
 
 # --------------------------------------------------------------------------- extraction checks
-def merge_details(details: dict, ext: dict, text: str) -> tuple[dict, list[str]]:
+def merge_details(details: dict, ext: dict, text: str) -> tuple[dict, list[tuple[str, dict]]]:
     """Add name/phone/age the patient actually typed in `text`. Returns (details, problems)."""
     details, problems = dict(details), []
     typed = _digits(text)
 
     phone = _digits(str(ext.get("phone") or ""))
-    if not phone:
+    if not phone or phone not in typed:
         runs = [_digits(x) for x in _PHONE_RUN.findall(text)]
         phone = max(runs, key=len) if runs else ""
-    if phone and len(phone) >= 7 and phone in typed:
+    if phone and len(phone) >= 7:
         try:
             details["phone"] = normalise_phone(phone)
         except ToolFailure:
             details.pop("phone", None)
-            problems.append(f"That phone number has {len(phone)} digits. Please share a 10-digit mobile number.")
+            core = phone[2:] if len(phone) == 12 and phone.startswith("91") else phone
+            if len(core) == 10:
+                problems.append(("phone_bad", {"num": core}))
+            else:
+                problems.append(("phone_len", {"n": len(phone)}))
 
     name = str(ext.get("name") or "").strip()
     if name and len(name) >= 2 and name.split()[0].casefold() in text.casefold():
@@ -68,7 +153,7 @@ def merge_details(details: dict, ext: dict, text: str) -> tuple[dict, list[str]]
         age = int(age) if age is not None else None
     except (TypeError, ValueError):
         age = None
-    if age is not None and 0 <= age <= 120 and re.search(rf"\b{age}\b", text):
+    if age is not None and 0 <= age <= 120 and re.search(rf"\b{age}\b", text) and str(age) != details.get("phone"):
         details["age"] = age
     if ext.get("new_patient") is not None:
         details["new_patient"] = bool(ext["new_patient"])
@@ -86,9 +171,19 @@ def match_doctor(ctx: ToolContext, said: str | None) -> m.Doctor | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def clean_date(value: Any, ctx: ToolContext) -> str | None:
-    """'today' / 'tomorrow' / ISO date, never in the past (fixes a model that guesses the wrong year)."""
+def clean_date(value: Any, ctx: ToolContext, text: str | None = None) -> str | None:
+    """'today' / 'tomorrow' / ISO date the patient actually asked for, never in the past.
+
+    With `text`, a date is only accepted if the message mentions one (the model tends to fill in
+    "today" when no date was given; at 8:38 pm that hid every slot, DEVLOG #32)."""
     v = str(value or "").strip().lower()
+    if text is not None:
+        if v == "today" and not _TODAY.search(text):
+            return None
+        if v == "tomorrow" and not _TOMORROW.search(text):
+            return None
+        if v not in ("today", "tomorrow") and not (_DATEISH.search(text) or _TOMORROW.search(text)):
+            return None
     if v in ("today", "tomorrow"):
         return v
     try:
@@ -122,7 +217,11 @@ def pick_option(offered: list[dict], ext: dict, text: str) -> dict | None:
         return offered[n - 1]
     said = _times(text)
     if said:
-        hits = [o for o in offered if _times(o["label"]) & said]
+        hits = [o for o in offered if _times(o.get("short") or o["label"]) & said]
+        if len(hits) == 1:
+            return hits[0]
+        loose = {(h % 12, mi) for h, mi in said}                 # "12:05 am" for a 12:05 PM slot
+        hits = [o for o in offered if {(h % 12, mi) for h, mi in _times(o.get("short") or o["label"])} & loose]
         if len(hits) == 1:
             return hits[0]
     return None
@@ -160,9 +259,61 @@ def _log(results: list, tool: str, args: dict, out: dict) -> dict:
 
 def _slot_label(s: dict) -> str:
     if s.get("booking_style") == "token":
-        return (f"{s['doctor']} · {s['estimated_time']} · token {s['next_token']} "
-                f"({s['patients_ahead']} ahead) · ₹{s['fee_inr']}")
+        return f"{s['doctor']} · token {s['next_token']}, about {s['estimated_time']} · ₹{s['fee_inr']}"
     return f"{s['doctor']} · {s['when']} · ₹{s['fee_inr']}"
+
+
+def _slot_short(s: dict) -> str:
+    if s.get("booking_style") == "token":
+        return f"token {s['next_token']}, about {s['estimated_time']}"
+    return s["when"]
+
+
+def _search(booking: dict, state: dict, ctx: ToolContext, results: list, say: dict) -> None:
+    """Find options: the requested day first, then the following days."""
+    base = {"appointment_type": booking.get("appointment_type", "new"), "window": booking.get("window") or "any",
+            "language": state.get("language", "en")}
+    if booking.get("doctor_id"):
+        base["doctor_id"] = booking["doctor_id"]
+    else:
+        base["specialty"] = booking["specialty"]
+    if booking.get("time"):
+        base["preferred_time"] = booking["time"]
+    who = booking.get("doctor") or booking.get("specialty") or ""
+    say["who"] = who
+
+    attempts = []
+    if booking.get("date"):
+        attempts.append({**base, "date": booking["date"], "days": 1})
+        try:
+            nxt = parse_day(booking["date"], ctx) + timedelta(days=1)
+            attempts.append({**base, "date": nxt.isoformat(), "days": 3, "preferred_time": None})
+        except ToolFailure:
+            pass
+    else:
+        attempts.append({**base, "date": "today", "days": 3})
+    if base["window"] != "any":
+        attempts.append({**attempts[-1], "window": "any"})
+
+    for i, args in enumerate(attempts):
+        args = {k: v for k, v in args.items() if v is not None}
+        fs = _log(results, "find_slots", args, run_tool("find_slots", args, ctx))
+        if not fs.get("ok"):
+            say["problems"].append(("past", {}) if fs.get("error") == "IN_PAST" else ("error", {}))
+            booking["date"] = None
+            return
+        if fs.get("slots"):
+            if i > 0 and booking.get("date"):
+                day = parse_day(booking["date"], ctx).strftime("%a %d %b").replace(" 0", " ")
+                say["problems"].append(("nothing_day", {"who": who, "day": day}))
+            booking["offered"] = [{"doctor_id": s["doctor_id"], "start": s["start"], "label": _slot_label(s),
+                                   "short": _slot_short(s), "doctor": s["doctor"], "fee_inr": s["fee_inr"],
+                                   "appointment_type": fs.get("appointment_type", args["appointment_type"])}
+                                  for s in fs["slots"][:3]]
+            say["options"] = booking["offered"]
+            return
+    say["problems"].append(("nothing_at_all", {"who": who}))
+    booking["date"] = None
 
 
 def run_flow(state: dict, ctx: ToolContext) -> dict:
@@ -172,67 +323,64 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
     booking = dict(state.get("booking") or {})
     results = list(state.get("tool_results", []))
     patient_id = state.get("patient_id")
-    say: dict = {"ask": [], "problems": [], "options": None, "booked": None}
+    say: dict = {"ask": [], "problems": [], "options": None, "booked": None, "who": booking.get("doctor", "")}
     upd: dict = {}
 
     last = results[-1] if results else None
-    # ---- just came back from the confirmation card
+    # ---- just came back from a card
     if last and last["tool"] == "book":
         if last["result"].get("ok"):
             appt = last["result"]
             pay = _log(results, "send_payment_link", {"appointment_id": appt["appointment_id"]},
                        run_tool("send_payment_link", {"appointment_id": appt["appointment_id"]}, ctx))
-            say["booked"] = {"doctor": appt.get("doctor"), "when": appt.get("when"),
-                             "token": appt.get("token_no"), "fee_inr": appt.get("fee_inr"),
+            say["booked"] = {"doctor": appt.get("doctor"), "when": appt.get("when"), "fee_inr": appt.get("fee_inr"),
                              "pay_url": pay.get("url") if pay.get("ok") else None}
             return {"booking": {}, "tool_results": results, "say": say, "hold_id": None}
         booking["chosen"] = None
         if last["result"].get("error") == "PATIENT_DECLINED":
-            say["problems"].append("No problem, nothing was booked. Would you like one of the other times?")
+            say["problems"].append(("declined_slot", {}))
+            say["options"] = booking.get("offered")
         else:
-            say["problems"].append(last["result"].get("message", "That booking didn't go through."))
+            say["problems"].append(("taken", {}))
             booking["offered"] = None
-        if booking.get("offered"):
-            say["options"] = booking["offered"]
+            _search(booking, state, ctx, results, say)
         return {"booking": booking, "tool_results": results, "say": say, "hold_id": None}
-    if last and last["tool"] == "register_patient" and not last["result"].get("ok"):
-        if last["result"].get("error") == "PATIENT_DECLINED":
-            say["problems"].append("Without your consent we can't book online, but our clinic staff can call you to help.")
-            return {"booking": {}, "tool_results": results, "say": say}
+    if last and last["tool"] == "register_patient" and last["result"].get("error") == "PATIENT_DECLINED":
+        say["problems"].append(("declined_consent", {}))
+        return {"booking": {}, "tool_results": results, "say": say}
 
     # ---- 1. details the patient typed
     details, problems = merge_details(booking.get("details") or {}, ext, text)
     booking["details"] = details
     say["problems"] += problems
 
-    # ---- 2. what they want
-    changed = False
-    doc = match_doctor(ctx, ext.get("doctor"))
-    if doc and doc.id != booking.get("doctor_id"):
-        booking.update(doctor_id=doc.id, doctor=doc.name, specialty=None)
-        changed = True
-    if ext.get("need") and not booking.get("doctor_id") and not booking.get("specialty"):
-        r = _log(results, "route_to_doctor", {"need": ext["need"]},
-                 run_tool("route_to_doctor", {"need": str(ext["need"])[:200]}, ctx))
-        if r.get("ok"):
-            booking["specialty"] = r["specialty"]
-            booking["need"] = ext["need"]
-            changed = True
-    for key, value in (("date", clean_date(ext.get("date"), ctx)),
-                       ("time", ext.get("time") if re.fullmatch(r"\d{2}:\d{2}", str(ext.get("time") or "")) else None),
-                       ("window", ext.get("window") if ext.get("window") in ("morning", "afternoon", "evening") else None)):
-        if value and value != booking.get(key):
-            booking[key] = value
-            changed = True
-    if ext.get("follow_up"):
-        booking["appointment_type"] = "follow_up"
-    if changed:
-        booking["offered"], booking["chosen"] = None, None
-
-    # ---- 3. which option they picked
+    # ---- 2. which option they picked (before anything else, so "the 12:05 one" isn't read as a new time)
     choice = pick_option(booking.get("offered") or [], ext, text)
     if choice:
         booking["chosen"] = choice
+    else:
+        # ---- 3. what they want
+        changed = False
+        doc = match_doctor(ctx, ext.get("doctor"))
+        if doc and doc.id != booking.get("doctor_id"):
+            booking.update(doctor_id=doc.id, doctor=doc.name, specialty=None)
+            changed = True
+        if ext.get("need") and not booking.get("doctor_id") and not booking.get("specialty"):
+            r = _log(results, "route_to_doctor", {"need": ext["need"]},
+                     run_tool("route_to_doctor", {"need": str(ext["need"])[:200]}, ctx))
+            if r.get("ok"):
+                booking.update(specialty=r["specialty"], need=ext["need"])
+                changed = True
+        window = next((w for w, rx in _WINDOW_WORDS.items() if rx.search(text)), None)
+        time_ = ext.get("time") if re.fullmatch(r"\d{2}:\d{2}", str(ext.get("time") or "")) and _times(text) else None
+        for key, value in (("date", clean_date(ext.get("date"), ctx, text)), ("time", time_), ("window", window)):
+            if value and value != booking.get(key):
+                booking[key] = value
+                changed = True
+        if ext.get("follow_up"):
+            booking["appointment_type"] = "follow_up"
+        if changed:
+            booking["offered"], booking["chosen"] = None, None
 
     # ---- 4. who they are
     if not patient_id:
@@ -243,6 +391,7 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
             if fp.get("ok"):
                 patient_id = fp["patient_id"]
                 upd["patient_id"] = patient_id
+                say["welcome"] = fp.get("name")
             elif fp.get("error") == "NOT_FOUND":
                 if details.get("age") is None:
                     missing.append("age")
@@ -258,35 +407,14 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
                     else:
                         upd["pending"] = {"call": {"id": "flow_register", "name": "register_patient", "args": args}}
             else:
-                say["problems"].append(fp.get("message", "We couldn't check those details."))
+                say["problems"].append(("error", {}))
         say["ask"] += missing
 
     # ---- 5. options
     if not booking.get("doctor_id") and not booking.get("specialty"):
         say["ask"].append("doctor")
     elif not booking.get("offered") and not booking.get("chosen"):
-        args = {"appointment_type": booking.get("appointment_type", "new"),
-                "date": booking.get("date") or "today", "days": 1 if booking.get("date") else 3,
-                "window": booking.get("window") or "any", "language": state.get("language", "en")}
-        if booking.get("doctor_id"):
-            args["doctor_id"] = booking["doctor_id"]
-        else:
-            args["specialty"] = booking["specialty"]
-        if booking.get("time"):
-            args["preferred_time"] = booking["time"]
-        fs = _log(results, "find_slots", args, run_tool("find_slots", args, ctx))
-        if fs.get("ok") and fs.get("slots"):
-            booking["offered"] = [{"doctor_id": s["doctor_id"], "start": s["start"], "label": _slot_label(s),
-                                   "appointment_type": fs.get("appointment_type", args["appointment_type"])}
-                                  for s in fs["slots"][:3]]
-            say["options"] = booking["offered"]
-        elif fs.get("ok"):
-            say["problems"].append("Nothing is free then. Would another day or time work?")
-            booking["date"] = None
-        else:
-            say["problems"].append(fs.get("message", "We couldn't search the schedule."))
-            if fs.get("error") == "IN_PAST":
-                booking["date"] = None
+        _search(booking, state, ctx, results, say)
 
     # ---- 6. hold the chosen slot → confirmation card
     chosen = booking.get("chosen")
@@ -299,13 +427,13 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
             upd["pending"] = {"call": {"id": "flow_book", "name": "book",
                                        "args": {"hold_id": h["hold_id"], "patient_id": patient_id}}}
         else:
-            say["problems"].append("That time was just taken. Here are fresh options.")
+            say["problems"].append(("taken", {}))
             booking["offered"], booking["chosen"] = None, None
-    elif booking.get("offered") and not chosen and not say["options"] and not say["ask"]:
-        say["options"] = booking["offered"]                     # remind them of the choices
-        say["ask"].append("option")
+            _search(booking, state, ctx, results, say)
     elif chosen and not patient_id:
-        say["chosen"] = chosen["label"]
+        say["chosen"] = chosen.get("short", chosen["label"])
+    elif booking.get("offered") and not say["options"] and not say["ask"] and not say["problems"]:
+        say["options"] = booking["offered"]                     # remind only when there's nothing else to say
 
     return {**upd, "booking": booking, "tool_results": results, "say": say}
 

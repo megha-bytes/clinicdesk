@@ -41,7 +41,7 @@ from app import models as m
 from app import repo
 from app.agent.models import ModelRouter, ModelUnavailable
 from app.agent.tools import ToolContext, appt_summary, label, openai_tool_specs, parse_start, run_tool
-from app.graphs.booking_flow import ASK_TEXT, flow_active, run_flow, unverified_times
+from app.graphs.booking_flow import flow_active, render, run_flow, unverified_times
 
 log = logging.getLogger(__name__)
 
@@ -88,25 +88,24 @@ Reschedule/cancel/queue: identify the patient first, then use their appointment_
 If the patient asks for a human, call handoff_to_staff. When nothing more is needed, reply with the word DONE.
 Never invent ids, times or fees; use only values returned by tools."""
 
-RESPOND_PROMPT = """You are the friendly receptionist of {clinic}. Reply in {language}, in 1–3 short sentences.
+RESPOND_PROMPT = """You are the friendly receptionist of {clinic}. Reply in {language}.
+Be brief: at most 2 short sentences, under 30 words; it may be read aloud on a phone call. No markdown.
 Hard rules:
 - State ONLY times, dates, fees, doctor names, token numbers, wait times and links that appear in TOOL RESULTS.
   If a needed fact is missing, say you'll check with the clinic staff. Never guess.
 - Never give medical advice, diagnosis or medication information. Offer to book a doctor instead.
 - If you need details to continue (name, age, phone number, preferred day or time, which option), ask for them.
 - If a tool result says PATIENT_DECLINED, accept it politely. If it says VERIFY_FIRST, ask for phone number and name.
-- If slots are listed, offer them as a short numbered list.
 - Only say an appointment is booked, confirmed, moved or cancelled if a TOOL RESULT below shows it succeeded.
 - Don't mention clinic policies, documents to bring, arrival times or rules unless they are in TOOL RESULTS.
 - Never show ids (patient, hold or appointment ids).
 TOOL RESULTS (this turn):
 {tool_results}"""
 
-CONSENT_TEXT = {
-    "en": ("To book appointments we store your name, age, phone number, language and a short reason for the visit, "
-           "only to manage your appointments at {clinic}. You can ask us to delete it at any time. Do you agree?"),
-    "hi": ("अपॉइंटमेंट के लिए हम आपका नाम, उम्र, फ़ोन नंबर, भाषा और विज़िट का छोटा कारण सेव करते हैं, सिर्फ़ {clinic} में "
-           "आपकी अपॉइंटमेंट संभालने के लिए। आप कभी भी इसे हटाने के लिए कह सकते हैं। क्या आप सहमत हैं?"),
+CONSENT_TEXT = {                 # short enough to read aloud; covers what, why, and deletion
+    "en": "We'll save your name, age and phone only for your appointments at {clinic}. You can ask us to delete it. OK?",
+    "hi": "हम आपका नाम, उम्र और फ़ोन सिर्फ़ {clinic} में आपकी अपॉइंटमेंट के लिए रखेंगे। आप इसे कभी भी हटवा सकते हैं। ठीक है?",
+    "kn": "ನಿಮ್ಮ ಹೆಸರು, ವಯಸ್ಸು ಮತ್ತು ಫೋನ್ ಅನ್ನು {clinic} ನಲ್ಲಿ ನಿಮ್ಮ ಅಪಾಯಿಂಟ್‌ಮೆಂಟ್‌ಗಾಗಿ ಮಾತ್ರ ಇಡುತ್ತೇವೆ. ಯಾವಾಗ ಬೇಕಾದರೂ ಅಳಿಸಲು ಹೇಳಬಹುದು. ಸರಿಯೇ?",
 }
 YES_WORDS = {"yes", "y", "ok", "okay", "sure", "confirm", "haan", "ha", "han", "ji", "haan ji", "हाँ", "हां", "ಹೌದು", "sari", "ಸರಿ"}
 
@@ -158,6 +157,17 @@ def scrub_ids(text: str) -> str:
     text = _ID.sub("", text)
     text = re.sub(r"[ \t]+([.,;:])", r"\1", text)
     return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def shorten(text: str, max_sentences: int = 2, max_words: int = 40) -> str:
+    """Keep model replies phone-sized: the first sentences, no markdown."""
+    text = re.sub(r"\*\*|__|[#`]", "", text or "").strip()
+    sentences = re.split(r"(?<=[.!?।])(?<!\bDr\.)(?<!\bMr\.)(?<!\bMs\.)(?<!Mrs\.)(?<!\bSt\.)\s+", text)
+    out = " ".join(sentences[:max_sentences])
+    words = out.split()
+    if len(words) > max_words:
+        out = " ".join(words[:max_words]).rstrip(",;:") + "…"
+    return out
 
 
 def false_claim(reply: str, tool_results: list[dict]) -> bool:
@@ -234,59 +244,8 @@ def _summary(ctx: ToolContext, call: dict, lang: str) -> tuple[str, str]:
     return "", ""
 
 
-FLOW_PROMPT = """You are the friendly receptionist of {clinic}. Reply in {language}: 1–2 short, warm sentences, plain text.
-Say only what THIS STEP needs:
-{step}
-Rules: never write times, dates, fees, doctor names, token numbers or links yourself (the clinic adds them below
-your message); never claim anything was booked unless the step says booked; no policies, no ids, no lists,
-no medical advice."""
-
-OPTION_HINT = {"en": "Reply with the option number.", "hi": "विकल्प का नंबर भेजें।", "kn": "ಆಯ್ಕೆಯ ಸಂಖ್ಯೆಯನ್ನು ಕಳುಹಿಸಿ."}
-
-
-def _say_facts(say: dict) -> dict:
-    out: dict = {}
-    if say.get("booked"):
-        out["booked"] = "Done. Thank them; the booking details and payment link are shown below your message."
-    if say.get("problems"):
-        out["tell_them"] = say["problems"]
-    if say.get("ask"):
-        out["ask_for"] = [ASK_TEXT.get(a, "which option they want") for a in say["ask"]]
-    if say.get("options"):
-        out["options"] = f"{len(say['options'])} options are listed below your message; introduce them in a few words."
-    if say.get("chosen"):
-        out["chosen"] = "They picked an option; it will be booked as soon as we have their details."
-    return out or {"note": "Ask how you can help with their appointment."}
-
-
-def _say_block(say: dict, lang: str) -> str:
-    lines = []
-    if say.get("options"):
-        lines += [f"{i}. {o['label']}" for i, o in enumerate(say["options"], 1)]
-        lines.append(OPTION_HINT.get(lang, OPTION_HINT["en"]))
-    if say.get("booked"):
-        b = say["booked"]
-        lines.append(f"✅ Booked: {b['doctor']} · {b['when']} · ₹{b['fee_inr']}")
-        if b.get("pay_url"):
-            lines.append(f"Pay here: {b['pay_url']}")
-    return ("\n\n" + "\n".join(lines)) if lines else ""
-
-
-def _fallback(say: dict) -> str:
-    parts = []
-    if say.get("booked"):
-        parts.append("Thank you, you're all set.")
-    parts += say.get("problems") or []
-    if say.get("ask"):
-        parts.append("Could you share " + ", ".join(ASK_TEXT.get(a, "which option you'd like") for a in say["ask"])
-                     .replace("their", "your").replace("they're", "you're") + "?")
-    if say.get("options"):
-        parts.append("Here are the available options:")
-    return " ".join(parts) or "How can I help with your appointment?"
-
-
-def _reply_problem(reply: str, results: list[dict], allowed: str, say: dict | None) -> str | None:
-    """Why a reply must be rewritten (None if it's fine)."""
+def _reply_problem(reply: str, results: list[dict], allowed: str) -> str | None:
+    """Why a model-written reply must be rewritten (None if it's fine)."""
     if false_claim(reply, results):
         return ("Nothing was booked, moved or cancelled in this turn. Rewrite the reply without claiming that; "
                 "offer the next step instead.")
@@ -295,7 +254,7 @@ def _reply_problem(reply: str, results: list[dict], allowed: str, say: dict | No
     bad = unverified_times(reply, allowed)
     if bad:
         return ("Your reply mentions times that are not in the facts. Remove them; "
-                + ("the options are shown below your message." if say else "only use times from TOOL RESULTS."))
+                + "only use times from TOOL RESULTS.")
     return None
 
 
@@ -497,39 +456,35 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
 
     def respond(state: State, ctx: ToolContext) -> State:
         results = state.get("tool_results", [])
-        lang_name = LANG_NAMES.get(state.get("language", "en"), "English")
         say = state.get("say")
+        if say is not None:                                   # booking step: templates, no model (DEVLOG #32)
+            reply = render(say, state.get("language", "en"))
+            return {"reply": reply, "messages": [{"role": "assistant", "content": reply}]}
+        lang_name = LANG_NAMES.get(state.get("language", "en"), "English")
         user = next((x["content"] for x in reversed(state["messages"]) if x["role"] == "user"), "")
-        if say is not None:
-            facts = json.dumps(_say_facts(say), ensure_ascii=False, default=str)
-            system = FLOW_PROMPT.format(clinic=ctx.clinic.name, language=lang_name, step=facts)
-        else:
-            facts = json.dumps([{"tool": r["tool"], "result": _public_result(r["result"])} for r in results],
-                               ensure_ascii=False, default=str)
-            system = RESPOND_PROMPT.format(clinic=ctx.clinic.name, tool_results=facts, language=lang_name)
+        facts = json.dumps([{"tool": r["tool"], "result": _public_result(r["result"])} for r in results],
+                           ensure_ascii=False, default=str)
+        system = RESPOND_PROMPT.format(clinic=ctx.clinic.name, tool_results=facts, language=lang_name)
         allowed = facts + " " + user
         msgs = [{"role": "system", "content": system}, *state["messages"][-8:]]
         reply = ""
         for attempt in range(2):
             try:
                 res = router.chat("super", msgs, purpose="reply", node="respond",
-                                  conversation_id=state.get("conversation_id"), max_tokens=400, temperature=0.3)
+                                  conversation_id=state.get("conversation_id"), max_tokens=150, temperature=0.3)
                 reply = res.content or ""
             except ModelUnavailable:
                 reply = ""
                 break
-            problem = _reply_problem(reply, results, allowed, say)
+            problem = _reply_problem(reply, results, allowed)
             if not problem:
                 break
             log.warning("reply rejected (%s); regenerating", problem)
             msgs = [*msgs, {"role": "assistant", "content": reply}, {"role": "system", "content": problem}]
         else:
-            if _reply_problem(reply, results, allowed, say):
-                reply = _fallback(say) if say is not None else \
-                    "I haven't booked anything yet. Shall I check the available times for you?"
-        reply = scrub_ids(reply)
-        if say is not None:
-            reply = (reply + _say_block(say, state.get("language", "en"))).strip()
+            if _reply_problem(reply, results, allowed):
+                reply = "I haven't booked anything yet. Shall I check the available times for you?"
+        reply = shorten(scrub_ids(reply))
         if not reply:
             reply = "Sorry, I'm having trouble right now. Our clinic staff will help you shortly."
         return {"reply": reply, "messages": [{"role": "assistant", "content": reply}]}

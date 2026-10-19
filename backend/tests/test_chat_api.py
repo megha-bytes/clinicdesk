@@ -40,7 +40,7 @@ def test_booking_over_http(client, session):
     assert client.post("/chat/turn", json={"text": "hello?", "thread_id": tid}).status_code == 409   # answer first
 
     body = client.post("/chat/answer", json={"thread_id": tid, "approved": True}).json()
-    assert body["interrupt"] is None and "1. Dr. Ananya Rao" in body["reply"]
+    assert body["interrupt"] is None and "Free with Dr. Ananya Rao" in body["reply"]
     body = client.post("/chat/turn", json={"text": "1", "thread_id": tid}).json()
     assert body["interrupt"]["kind"] == "confirm" and "₹500" in body["interrupt"]["summary"]
     body = client.post("/chat/answer", json={"thread_id": tid, "approved": True}).json()
