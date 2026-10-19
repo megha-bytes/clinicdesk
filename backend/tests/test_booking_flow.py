@@ -1,0 +1,234 @@
+"""Deterministic booking flow (DEVLOG #31): the model only extracts details; code makes every decision.
+
+The fake "understand" step returns whatever extraction a test gives it, including the kinds of
+mistakes the real model made in live runs (wrong year, intent "info" for "3", 11-digit phone).
+"""
+import json
+import sqlite3
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+from langgraph.checkpoint.sqlite import SqliteSaver
+from sqlalchemy import func, select
+
+from app import models as m
+from app.agent.models import MemoryLedger, ModelRouter, load_tiers
+from app.agent.tools import ToolContext
+from app.graphs.booking_flow import clean_date, merge_details, pick_option, unverified_times
+from app.graphs.clinicdesk import answer, build_graph, pending_interrupt, send
+from app.seed import seed
+from tests.fakes import FakeClient, msg
+
+IST = ZoneInfo("Asia/Kolkata")
+NOW = datetime(2026, 10, 12, 9, 47, tzinfo=IST)          # Monday
+
+
+@pytest.fixture
+def clinic(session):
+    return seed(session, now=NOW)["clinic_id"]
+
+
+class Fake:
+    """Plays the models. `extract[text]` is what 'understand' returns for that patient message."""
+
+    def __init__(self, extract: dict, reply="Sure."):
+        self.extract, self.reply, self.steps, self.agent_calls = extract, reply, [], 0
+
+    def __call__(self, kw):
+        system = kw["messages"][0]["content"]
+        if "You classify messages" in system:
+            text = kw["messages"][1]["content"].split("Patient: ")[-1]
+            return msg(json.dumps({"language": "en", **self.extract.get(text, {"intent": "smalltalk"})}))
+        if "action step" in system:
+            self.agent_calls += 1
+            return msg("DONE")
+        self.steps.append(json.loads(system.split("Say only what THIS STEP needs:\n", 1)[1].split("\nRules:")[0])
+                          if "THIS STEP" in system else None)
+        return msg(self.reply(len(self.steps)) if callable(self.reply) else self.reply)
+
+
+def graph_for(session, clinic_id, fake, checkpointer=None):
+    ledger = MemoryLedger()
+    router = ModelRouter(FakeClient(fake), tiers=load_tiers(), ledger=ledger)
+    return build_graph(router, lambda: ToolContext(session=session, clinic_id=clinic_id, now=NOW), checkpointer), ledger
+
+
+NEHA = "Book Dr. Rao tomorrow. New patient Neha Rao, 30, 9123456789"
+NEHA_EXT = {"intent": "book", "doctor": "Dr. Rao", "date": "tomorrow", "name": "Neha Rao", "age": 30,
+            "phone": "9123456789", "new_patient": True}
+
+
+def patients(session):
+    return session.scalar(select(func.count()).select_from(m.Patient))
+
+
+def test_new_patient_books_end_to_end(session, clinic):
+    fake = Fake({NEHA: NEHA_EXT, "2": {"intent": "info", "option": 2}})   # live model called "3" info
+    g, ledger = graph_for(session, clinic, fake)
+
+    out = send(g, "t", NEHA)
+    assert out["interrupt"]["kind"] == "consent" and patients(session) == 60
+
+    out = answer(g, "t", "yes")
+    assert out["interrupt"] is None
+    assert "1. Dr. Ananya Rao · Tue 13 Oct" in out["reply"] and "Reply with the option number." in out["reply"]
+    option2 = out["reply"].split("2. ", 1)[1].split("\n")[0]
+    when = option2.split(" · ")[1]
+
+    out = send(g, "t", "2")
+    q = out["interrupt"]
+    assert q["kind"] == "confirm" and when in q["summary"] and "₹500" in q["summary"]
+
+    out = answer(g, "t", "yes")
+    assert f"✅ Booked: Dr. Ananya Rao · {when} · ₹500" in out["reply"] and "Pay here: " in out["reply"]
+    p = session.scalar(select(m.Patient).where(m.Patient.phone == "9123456789"))
+    appt = session.scalar(select(m.Appointment).where(m.Appointment.patient_id == p.id))
+    assert appt.status == "confirmed" and p.consent_at is not None
+    assert session.scalar(select(m.Payment.amount_inr).where(m.Payment.appointment_id == appt.id)) == 500
+    assert fake.agent_calls == 0                                          # no model-driven tool calls
+    assert {r.purpose for r in ledger.records} == {"intent", "reply"}
+
+
+def test_live_run_replay_eleven_digit_phone(session, clinic):
+    """DEVLOG #31: phone had 11 digits; the assistant said 'noted' and could never book."""
+    fake = Fake({
+        "I want an appointment with Dr. Rao": {"intent": "book", "doctor": "Dr. Rao"},
+        "I am John, my phone number is 87976545677, I am 23 years old":
+            {"intent": "book", "name": "John", "phone": "87976545677", "age": 23},
+        "sorry, 9823461744": {"intent": "book", "phone": "9823461744"},
+    })
+    g, _ = graph_for(session, clinic, fake)
+    out = send(g, "t", "I want an appointment with Dr. Rao")
+    assert "1. Dr. Ananya Rao" in out["reply"]                             # options straight away
+    assert set(fake.steps[-1]["ask_for"]) == {"their name", "their 10-digit mobile number"}
+
+    out = send(g, "t", "I am John, my phone number is 87976545677, I am 23 years old")
+    assert "That phone number has 11 digits" in json.dumps(fake.steps[-1]) and out["interrupt"] is None
+
+    out = send(g, "t", "sorry, 9823461744")
+    assert out["interrupt"]["kind"] == "consent"                           # name + age remembered
+
+
+def test_existing_patient_needs_no_consent_and_can_pick_by_time(session, clinic):
+    p = session.scalars(select(m.Patient).where(m.Patient.consent_at.is_not(None))).first()
+    first = f"Dr. Rao tomorrow please, {p.name}, {p.phone}"
+    fake = Fake({first: {"intent": "book", "doctor": "Rao", "date": "tomorrow", "name": p.name, "phone": p.phone}})
+    g, _ = graph_for(session, clinic, fake)
+    out = send(g, "t", first)
+    assert out["interrupt"] is None
+    when = out["reply"].split("1. ", 1)[1].split(" · ")[1]                  # e.g. "Tue 13 Oct, 9:20 AM"
+    clock = when.split(", ")[1]
+    fake.extract[f"the {clock} one"] = {"intent": "book"}
+    out = send(g, "t", f"the {clock} one")
+    assert out["interrupt"]["kind"] == "confirm" and when in out["interrupt"]["summary"]
+
+
+def test_choice_before_details_goes_straight_to_the_card_after_consent(session, clinic):
+    fake = Fake({"Dr. Rao tomorrow": {"intent": "book", "doctor": "Dr. Rao", "date": "tomorrow"},
+                 "1": {"intent": "book", "option": 1},
+                 "Neha Rao, 30, 9123456789": {"intent": "book", "name": "Neha Rao", "age": 30, "phone": "9123456789"}})
+    g, _ = graph_for(session, clinic, fake)
+    send(g, "t", "Dr. Rao tomorrow")
+    out = send(g, "t", "1")
+    assert out["interrupt"] is None and fake.steps[-1].get("chosen")
+    assert send(g, "t", "Neha Rao, 30, 9123456789")["interrupt"]["kind"] == "consent"
+    q = answer(g, "t", "yes")["interrupt"]
+    assert q["kind"] == "confirm" and "Dr. Ananya Rao" in q["summary"]
+
+
+def test_declined_consent_stores_nothing(session, clinic):
+    fake = Fake({NEHA: NEHA_EXT})
+    g, _ = graph_for(session, clinic, fake)
+    send(g, "t", NEHA)
+    out = answer(g, "t", "no")
+    assert out["interrupt"] is None and "staff can call you" in fake.steps[-1]["tell_them"][0]
+    assert patients(session) == 60
+
+
+def test_declined_booking_changes_nothing_and_offers_options_again(session, clinic):
+    fake = Fake({NEHA: NEHA_EXT, "1": {"intent": "book", "option": 1}})
+    g, _ = graph_for(session, clinic, fake)
+    send(g, "t", NEHA)
+    answer(g, "t", "yes")
+    send(g, "t", "1")
+    out = answer(g, "t", "no")
+    assert "1. Dr. Ananya Rao" in out["reply"]
+    p = session.scalar(select(m.Patient).where(m.Patient.phone == "9123456789"))
+    assert "confirmed" not in session.scalars(select(m.Appointment.status).where(m.Appointment.patient_id == p.id)).all()
+
+
+def test_paused_card_survives_a_restart(session, clinic, tmp_path):
+    path = str(tmp_path / "cp.db")
+    fake = Fake({NEHA: NEHA_EXT, "1": {"intent": "book", "option": 1}})
+    g1, _ = graph_for(session, clinic, fake, SqliteSaver(sqlite3.connect(path, check_same_thread=False)))
+    send(g1, "t", NEHA)
+    answer(g1, "t", "yes")
+    send(g1, "t", "1")
+    del g1
+    g2, _ = graph_for(session, clinic, fake, SqliteSaver(sqlite3.connect(path, check_same_thread=False)))
+    assert pending_interrupt(g2, "t")["kind"] == "confirm"
+    assert "✅ Booked" in answer(g2, "t", "yes")["reply"]
+
+
+def test_invented_times_in_the_reply_are_rejected(session, clinic):
+    """DEVLOG #31: the reply writer listed 09:00, 09:30, 10:30, 11:00, none of them real."""
+    fake = Fake({"Dr. Rao tomorrow": {"intent": "book", "doctor": "Dr. Rao", "date": "tomorrow"}},
+                reply="We have 09:00 and 09:30 free. [Tool: find_slots]")
+    g, _ = graph_for(session, clinic, fake)
+    out = send(g, "t", "Dr. Rao tomorrow")
+    head = out["reply"].split("\n\n1. ")[0]
+    assert len(fake.steps) == 2 and "09:00" not in head and "Tool" not in head
+    assert head.startswith("Could you share your name")
+
+
+def test_model_cannot_pick_a_date_in_the_past(session, clinic):
+    fake = Fake({"Dr. Rao on 20 October": {"intent": "book", "doctor": "Dr. Rao", "date": "2024-10-20"}})
+    g, _ = graph_for(session, clinic, fake)
+    out = send(g, "t", "Dr. Rao on 20 October")
+    assert "1. Dr. Ananya Rao · Tue 20 Oct" in out["reply"]
+
+
+def test_other_intents_still_use_the_agent(session, clinic):
+    fake = Fake({"what are your timings": {"intent": "info"}})
+    g, _ = graph_for(session, clinic, fake)
+    send(g, "t", "what are your timings")
+    assert fake.agent_calls == 1
+
+
+# ------------------------------------------------------------------ helpers
+class Ctx:
+    class local_now:  # noqa: N801
+        @staticmethod
+        def date():
+            return NOW.date()
+    local_now = NOW
+
+
+def test_clean_date():
+    assert clean_date("2024-10-20", Ctx) == "2026-10-20"
+    assert clean_date("2026-01-05", Ctx) == "2027-01-05"
+    assert clean_date("tomorrow", Ctx) == "tomorrow" and clean_date("next week", Ctx) is None
+
+
+def test_merge_details_only_keeps_what_was_typed():
+    d, problems = merge_details({}, {"name": "Ravi", "age": 40, "phone": "9123456789"}, "book me please")
+    assert d == {} and problems == []
+    d, problems = merge_details({}, {}, "I'm Asha, 9123456789, 34 years")
+    assert d["phone"] == "9123456789" and d["age"] == 34
+    d, problems = merge_details({}, {"phone": "87976545677"}, "87976545677")
+    assert "phone" not in d and "11 digits" in problems[0]
+
+
+def test_pick_option():
+    offered = [{"label": "Dr. A · Tue 13 Oct, 9:20 AM · ₹500"}, {"label": "Dr. A · Tue 13 Oct, 10:00 AM · ₹500"}]
+    assert pick_option(offered, {}, "2") is offered[1]
+    assert pick_option(offered, {"option": 1}, "the first") is offered[0]
+    assert pick_option(offered, {}, "10 am works") is offered[1]
+    assert pick_option(offered, {}, "5") is None and pick_option(offered, {}, "maybe") is None
+
+
+def test_unverified_times():
+    assert unverified_times("Come at 9:20 AM", "Tue 13 Oct, 9:20 AM") == set()
+    assert unverified_times("We have 09:00 free", "9:20 AM") == {(9, 0), (21, 0)}
+    assert unverified_times("Thanks!", "") == set()

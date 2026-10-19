@@ -1,10 +1,13 @@
 """ClinicDeskGraph v2 (Day 7): booking, consent and confirmation inside LangGraph.
 
-    START → intent ──┬─ smalltalk/other ────────────────────────────────────────────┐
-                     └─ data/booking → agent ⇄ tools                                  │
-                                         │  (gated action)                            │
-                                         └→ confirm ⏸ interrupt → execute → agent     │
-                                         └─ (no more tool calls) ───────────────────→ respond → END
+    START → understand ─┬─ booking ─→ flow (deterministic, booking_flow.py) ─┬─ card → confirm ⏸ → execute → flow
+                        │                                                     └──────────────────────→ respond → END
+                        ├─ other data ─→ agent ⇄ tools ─┬─ card → confirm ⏸ → execute → agent
+                        │                               └──────────────────────────────────────────→ respond
+                        └─ smalltalk ──────────────────────────────────────────────────────────────→ respond
+
+`understand` (Lightning) classifies the message AND extracts details (doctor, date, time, name, phone,
+age, option number). Bookings then run as plain code; the model never decides a booking step.
 
 Safety rules enforced by the graph, not the prompt
 - **Consent**: `register_patient` never runs on the model's say-so. The graph pauses with a fixed
@@ -38,6 +41,7 @@ from app import models as m
 from app import repo
 from app.agent.models import ModelRouter, ModelUnavailable
 from app.agent.tools import ToolContext, appt_summary, label, openai_tool_specs, parse_start, run_tool
+from app.graphs.booking_flow import ASK_TEXT, flow_active, run_flow, unverified_times
 
 log = logging.getLogger(__name__)
 
@@ -53,15 +57,22 @@ GATED = {"register_patient", "book", "reschedule", "cancel"}             # graph
 NEEDS_PATIENT = {"book", "reschedule", "cancel", "queue_status", "join_waitlist"}
 SETS_PATIENT = {"find_patient", "register_patient"}
 
-INTENT_PROMPT = """You classify messages sent to a clinic's front desk.
-Return ONLY a JSON object: {"intent": <one of %s>, "language": <"en" | "hi" | "kn" | "other">}.
-- info: timings, fees, doctors, address, availability questions
+INTENT_PROMPT = """You classify messages sent to a clinic's front desk and extract details from them.
+Today is {today}.
+Return ONLY a JSON object with these keys (null when the patient didn't say it in THIS message):
+{{"intent": one of {intents}, "language": "en" | "hi" | "kn" | "other",
+ "doctor": doctor name as said, "need": reason for the visit in a few words,
+ "date": "today" | "tomorrow" | "YYYY-MM-DD", "time": "HH:MM" (24h), "window": "morning" | "afternoon" | "evening",
+ "name": patient's name, "age": number, "phone": digits exactly as typed, "new_patient": true | false,
+ "follow_up": true | false, "option": number of the option they picked}}
+- info: timings, fees, doctors, address questions
 - book / reschedule / cancel / queue (token or wait time) / pay
 - human: wants to talk to a person
 - smalltalk: greetings, thanks, goodbyes
-- A short answer (yes, no, a time, a number, an option) belongs to whatever the assistant's last message asked about.
 - other: anything else (including medical questions)
-Language is the language the patient wrote in (Hindi in Latin script counts as "hi").""" % (list(INTENTS),)
+- A short answer (yes, no, a time, a number, a name, a phone number) belongs to whatever the assistant's
+  last message asked about; while booking, that's "book".
+Language is the language the patient wrote in (Hindi in Latin script counts as "hi")."""
 
 AGENT_PROMPT = """You are the action step of the front desk of {clinic}. Today is {today} ({tz}).
 Decide which tools to call for the patient's latest message. You never write to the patient yourself.
@@ -109,6 +120,10 @@ class State(TypedDict, total=False):
     patient_id: str | None       # verified in THIS conversation
     pending: dict | None         # gated call waiting for the patient: {"call", "kind", "summary"}
     consented: bool              # patient agreed to the privacy notice in this conversation
+    ext: dict                    # details extracted from the latest message
+    booking: dict                # booking in progress: doctor, date, details, offered options, chosen
+    in_flow: bool                # this turn is handled by the deterministic booking flow
+    say: dict | None             # what the booking flow needs the reply to contain
     hold_id: str | None          # an active hold waiting to be booked
     rounds: int
     reply: str
@@ -219,6 +234,71 @@ def _summary(ctx: ToolContext, call: dict, lang: str) -> tuple[str, str]:
     return "", ""
 
 
+FLOW_PROMPT = """You are the friendly receptionist of {clinic}. Reply in {language}: 1–2 short, warm sentences, plain text.
+Say only what THIS STEP needs:
+{step}
+Rules: never write times, dates, fees, doctor names, token numbers or links yourself (the clinic adds them below
+your message); never claim anything was booked unless the step says booked; no policies, no ids, no lists,
+no medical advice."""
+
+OPTION_HINT = {"en": "Reply with the option number.", "hi": "विकल्प का नंबर भेजें।", "kn": "ಆಯ್ಕೆಯ ಸಂಖ್ಯೆಯನ್ನು ಕಳುಹಿಸಿ."}
+
+
+def _say_facts(say: dict) -> dict:
+    out: dict = {}
+    if say.get("booked"):
+        out["booked"] = "Done. Thank them; the booking details and payment link are shown below your message."
+    if say.get("problems"):
+        out["tell_them"] = say["problems"]
+    if say.get("ask"):
+        out["ask_for"] = [ASK_TEXT.get(a, "which option they want") for a in say["ask"]]
+    if say.get("options"):
+        out["options"] = f"{len(say['options'])} options are listed below your message; introduce them in a few words."
+    if say.get("chosen"):
+        out["chosen"] = "They picked an option; it will be booked as soon as we have their details."
+    return out or {"note": "Ask how you can help with their appointment."}
+
+
+def _say_block(say: dict, lang: str) -> str:
+    lines = []
+    if say.get("options"):
+        lines += [f"{i}. {o['label']}" for i, o in enumerate(say["options"], 1)]
+        lines.append(OPTION_HINT.get(lang, OPTION_HINT["en"]))
+    if say.get("booked"):
+        b = say["booked"]
+        lines.append(f"✅ Booked: {b['doctor']} · {b['when']} · ₹{b['fee_inr']}")
+        if b.get("pay_url"):
+            lines.append(f"Pay here: {b['pay_url']}")
+    return ("\n\n" + "\n".join(lines)) if lines else ""
+
+
+def _fallback(say: dict) -> str:
+    parts = []
+    if say.get("booked"):
+        parts.append("Thank you, you're all set.")
+    parts += say.get("problems") or []
+    if say.get("ask"):
+        parts.append("Could you share " + ", ".join(ASK_TEXT.get(a, "which option you'd like") for a in say["ask"])
+                     .replace("their", "your").replace("they're", "you're") + "?")
+    if say.get("options"):
+        parts.append("Here are the available options:")
+    return " ".join(parts) or "How can I help with your appointment?"
+
+
+def _reply_problem(reply: str, results: list[dict], allowed: str, say: dict | None) -> str | None:
+    """Why a reply must be rewritten (None if it's fine)."""
+    if false_claim(reply, results):
+        return ("Nothing was booked, moved or cancelled in this turn. Rewrite the reply without claiming that; "
+                "offer the next step instead.")
+    if "[tool" in reply.lower() or "tool:" in reply.lower():
+        return "Don't describe tools or tool calls. Write only the message to the patient."
+    bad = unverified_times(reply, allowed)
+    if bad:
+        return ("Your reply mentions times that are not in the facts. Remove them; "
+                + ("the options are shown below your message." if say else "only use times from TOOL RESULTS."))
+    return None
+
+
 def _public_result(result: dict) -> dict:
     """Tool result without internal ids, for the reply writer."""
     if not isinstance(result, dict):
@@ -254,19 +334,29 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
     def intent(state: State) -> State:
         user = next((x["content"] for x in reversed(state["messages"]) if x["role"] == "user"), "")
         prev = next((x["content"] for x in reversed(state["messages"]) if x["role"] == "assistant"), "")
-        content = f"Assistant's last message: {prev[:300]}\nPatient: {user}" if prev else user
+        content = f"Assistant's last message: {prev[:400]}\nPatient: {user}" if prev else user
+        ctx = make_ctx()
         try:
-            res = router.chat("lightning", [{"role": "system", "content": INTENT_PROMPT},
+            today = ctx.local_now.strftime("%A %Y-%m-%d")
+        finally:
+            if ctx.owns_session:
+                ctx.session.close()
+        try:
+            res = router.chat("lightning", [{"role": "system", "content": INTENT_PROMPT.format(
+                                                today=today, intents=list(INTENTS))},
                                             {"role": "user", "content": content}],
                               purpose="intent", node="intent", conversation_id=state.get("conversation_id"),
-                              max_tokens=60, temperature=0)
+                              max_tokens=200, temperature=0)
             data = _parse_json(res.content)
         except ModelUnavailable:
             data = {}
         it = data.get("intent") if data.get("intent") in INTENTS else "info"
         lang = data.get("language") if data.get("language") in LANG_NAMES else state.get("language", "en")
-        # A new patient turn: clear this turn's working memory.
-        return {"intent": it, "language": lang, "scratch": [], "tool_results": [], "rounds": 0, "pending": None}
+        upd = {"intent": it, "language": lang, "ext": data, "say": None,
+               # a new patient turn: clear this turn's working memory
+               "scratch": [], "tool_results": [], "rounds": 0, "pending": None}
+        upd["in_flow"] = flow_active({**state, **upd})
+        return upd
 
     def agent(state: State, ctx: ToolContext) -> State:
         system = AGENT_PROMPT.format(clinic=ctx.clinic.name, tz=ctx.clinic.timezone,
@@ -380,7 +470,7 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         patient_id = state.get("patient_id")
         if call["name"] in SETS_PATIENT and out.get("ok"):
             patient_id = out["patient_id"]
-        extra: dict = {}
+        extra: dict = {"ext": {}}
         if call["name"] == "register_patient" and p["approved"]:
             extra["consented"] = True
         if call["name"] == "book":
@@ -392,12 +482,32 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
                                                           "result": out}],
                 "patient_id": patient_id, "pending": None}
 
+    def flow(state: State, ctx: ToolContext) -> State:
+        upd = run_flow(state, ctx)
+        p = upd.get("pending")
+        if p:
+            kind, summary = _summary(ctx, p["call"], state.get("language", "en"))
+            if kind:
+                p.update(kind=kind, summary=summary)
+            else:
+                upd["pending"] = None
+        else:
+            upd["pending"] = None
+        return upd
+
     def respond(state: State, ctx: ToolContext) -> State:
         results = state.get("tool_results", [])
-        facts = json.dumps([{"tool": r["tool"], "result": _public_result(r["result"])} for r in results],
-                           ensure_ascii=False, default=str)
-        system = RESPOND_PROMPT.format(clinic=ctx.clinic.name, tool_results=facts,
-                                       language=LANG_NAMES.get(state.get("language", "en"), "English"))
+        lang_name = LANG_NAMES.get(state.get("language", "en"), "English")
+        say = state.get("say")
+        user = next((x["content"] for x in reversed(state["messages"]) if x["role"] == "user"), "")
+        if say is not None:
+            facts = json.dumps(_say_facts(say), ensure_ascii=False, default=str)
+            system = FLOW_PROMPT.format(clinic=ctx.clinic.name, language=lang_name, step=facts)
+        else:
+            facts = json.dumps([{"tool": r["tool"], "result": _public_result(r["result"])} for r in results],
+                               ensure_ascii=False, default=str)
+            system = RESPOND_PROMPT.format(clinic=ctx.clinic.name, tool_results=facts, language=lang_name)
+        allowed = facts + " " + user
         msgs = [{"role": "system", "content": system}, *state["messages"][-8:]]
         reply = ""
         for attempt in range(2):
@@ -408,25 +518,35 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
             except ModelUnavailable:
                 reply = ""
                 break
-            if not false_claim(reply, results):
+            problem = _reply_problem(reply, results, allowed, say)
+            if not problem:
                 break
-            log.warning("reply claimed an action no tool confirmed; regenerating")
-            msgs = [*msgs, {"role": "assistant", "content": reply},
-                    {"role": "system", "content": "Nothing was booked, moved or cancelled in this turn. Rewrite "
-                     "the reply without claiming that; offer the next step instead."}]
+            log.warning("reply rejected (%s); regenerating", problem)
+            msgs = [*msgs, {"role": "assistant", "content": reply}, {"role": "system", "content": problem}]
         else:
-            reply = ("I haven't booked anything yet. Shall I check the available times for you?"
-                     if false_claim(reply, results) else reply)
+            if _reply_problem(reply, results, allowed, say):
+                reply = _fallback(say) if say is not None else \
+                    "I haven't booked anything yet. Shall I check the available times for you?"
         reply = scrub_ids(reply)
+        if say is not None:
+            reply = (reply + _say_block(say, state.get("language", "en"))).strip()
         if not reply:
             reply = "Sorry, I'm having trouble right now. Our clinic staff will help you shortly."
         return {"reply": reply, "messages": [{"role": "assistant", "content": reply}]}
 
     # ---------------------------------------------------------------- edges
     def after_intent(state: State) -> str:
+        if state.get("in_flow"):
+            return "flow"
         if state.get("intent") in DATA_INTENTS or state.get("hold_id"):
             return "agent"
         return "respond"
+
+    def after_flow(state: State) -> str:
+        return "confirm" if state.get("pending") else "respond"
+
+    def after_execute(state: State) -> str:
+        return "flow" if state.get("in_flow") else "agent"
 
     def after_agent(state: State) -> str:
         last = state["scratch"][-1] if state.get("scratch") else {}
@@ -440,15 +560,16 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         return "agent" if state.get("rounds", 0) < MAX_TOOL_ROUNDS else "respond"
 
     g = StateGraph(State)
-    for name, fn in (("intent", intent), ("agent", with_ctx(agent)), ("tools", with_ctx(tools)),
+    for name, fn in (("intent", intent), ("flow", with_ctx(flow)), ("agent", with_ctx(agent)), ("tools", with_ctx(tools)),
                      ("confirm", confirm), ("execute", with_ctx(execute)), ("respond", with_ctx(respond))):
         g.add_node(name, fn)
     g.add_edge(START, "intent")
-    g.add_conditional_edges("intent", after_intent, {"agent": "agent", "respond": "respond"})
+    g.add_conditional_edges("intent", after_intent, {"flow": "flow", "agent": "agent", "respond": "respond"})
+    g.add_conditional_edges("flow", after_flow, {"confirm": "confirm", "respond": "respond"})
     g.add_conditional_edges("agent", after_agent, {"tools": "tools", "respond": "respond"})
     g.add_conditional_edges("tools", after_tools, {"confirm": "confirm", "agent": "agent", "respond": "respond"})
     g.add_edge("confirm", "execute")
-    g.add_edge("execute", "agent")
+    g.add_conditional_edges("execute", after_execute, {"flow": "flow", "agent": "agent"})
     g.add_edge("respond", END)
     if checkpointer is None:                    # pausing for the patient needs somewhere to keep state
         from langgraph.checkpoint.memory import InMemorySaver

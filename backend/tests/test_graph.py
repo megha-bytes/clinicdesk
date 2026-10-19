@@ -1,28 +1,25 @@
-"""ClinicDeskGraph v2: booking with consent and confirmation enforced by the graph.
+"""ClinicDeskGraph: the tool-calling agent path (cancel, reschedule, info) and reply checks.
 
-The fake model plays a deliberately over-eager agent: it always passes consent=True and tries to
-book under someone else's patient_id. The graph must override both.
+The fake model plays a deliberately over-eager agent: it tries actions without verifying the patient
+and under someone else's patient_id. The graph must stop both. Bookings: tests/test_booking_flow.py.
 """
 import json
-import sqlite3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from langgraph.checkpoint.sqlite import SqliteSaver
 from sqlalchemy import func, select
 
 from app import models as m
 from app import repo
 from app.agent.models import DEFAULT_MODELS, MemoryLedger, ModelRouter, load_tiers
 from app.agent.tools import ToolContext
-from app.graphs.clinicdesk import MAX_TOOL_ROUNDS, answer, build_graph, is_yes, pending_interrupt, send
+from app.graphs.clinicdesk import MAX_TOOL_ROUNDS, answer, build_graph, is_yes, send
 from app.seed import seed
 from tests.fakes import FakeClient, msg
 
 IST = ZoneInfo("Asia/Kolkata")
 NOW = datetime(2026, 10, 12, 9, 47, tzinfo=IST)
-NEW_PATIENT = dict(name="Neha Rao", age=30, phone="9123456789", language="en", consent=True)
 
 
 def done_tools(messages):
@@ -41,7 +38,7 @@ def last(done, name):
     return next((r for n, r in reversed(done) if n == name), None)
 
 
-def make_handler(planner, intent="book", language="en"):
+def make_handler(planner, intent="info", language="en"):
     """planner(done) -> ("tool", args) | None (meaning DONE)."""
     def handler(kw):
         system = kw["messages"][0]["content"] if kw["messages"][0]["role"] == "system" else ""
@@ -71,71 +68,6 @@ def graph_for(session, clinic_id, handler, checkpointer=None):
     router = ModelRouter(FakeClient(handler), tiers=load_tiers(), ledger=ledger)
     g = build_graph(router, lambda: ToolContext(session=session, clinic_id=clinic_id, now=NOW), checkpointer)
     return g, ledger
-
-
-def booking_planner(rao_id, book_as="someone-else"):
-    def plan(done):
-        names = [n for n, _ in done]
-        reg = last(done, "register_patient")
-        if reg is None:
-            return ("register_patient", NEW_PATIENT)
-        if not reg.get("ok"):
-            return None
-        if "find_slots" not in names:
-            return ("find_slots", {"appointment_type": "new", "doctor_id": rao_id, "date": "tomorrow"})
-        if "hold_slot" not in names:
-            slot = last(done, "find_slots")["slots"][0]
-            return ("hold_slot", {"doctor_id": rao_id, "start": slot["start"], "appointment_type": "new"})
-        booked = last(done, "book")
-        if booked is None:
-            return ("book", {"hold_id": last(done, "hold_slot")["hold_id"], "patient_id": book_as})
-        if booked.get("ok") and "send_payment_link" not in names:
-            return ("send_payment_link", {"appointment_id": booked["appointment_id"]})
-        return None
-    return plan
-
-
-# ------------------------------------------------------------------ booking
-def test_books_new_patient_with_consent_and_confirmation(session, clinic):
-    rao = doctor(session)
-    g, ledger = graph_for(session, clinic, make_handler(booking_planner(rao.id)))
-    out = send(g, "t1", "Book me with Dr. Rao tomorrow. Neha Rao, 30, 9123456789")
-    assert out["interrupt"]["kind"] == "consent" and "Do you agree?" in out["interrupt"]["summary"]
-    assert session.scalar(select(func.count()).select_from(m.Patient)) == 60       # nothing stored yet
-
-    out = answer(g, "t1", "yes")
-    q = out["interrupt"]
-    assert q["kind"] == "confirm" and q["action"] == "book"
-    assert "Dr. Ananya Rao" in q["summary"] and "₹500" in q["summary"]            # from the DB, not the model
-
-    out = answer(g, "t1", True)
-    assert out["reply"].startswith("REPLY[") and "book:ok" in out["reply"] and "send_payment_link:ok" in out["reply"]
-    patient = session.scalar(select(m.Patient).where(m.Patient.phone == "9123456789"))
-    appt = session.scalar(select(m.Appointment).where(m.Appointment.patient_id == patient.id))
-    assert patient.consent_at is not None
-    assert appt.status == "confirmed"                       # booked for the VERIFIED patient, not "someone-else"
-    assert session.scalar(select(m.Payment).where(m.Payment.appointment_id == appt.id)).amount_inr == 500
-    assert {r.purpose for r in ledger.records} == {"intent", "tool_selection", "reply"}
-
-
-def test_declined_consent_stores_nothing_even_though_model_said_true(session, clinic):
-    g, _ = graph_for(session, clinic, make_handler(booking_planner(doctor(session).id)))
-    send(g, "t1", "Book me please. Neha Rao, 30, 9123456789")
-    out = answer(g, "t1", "no")
-    assert "register_patient:PATIENT_DECLINED" in out["reply"]
-    assert session.scalar(select(func.count()).select_from(m.Patient)) == 60
-    assert session.scalar(select(m.Patient).where(m.Patient.phone == "9123456789")) is None
-
-
-def test_declined_booking_changes_nothing(session, clinic):
-    g, _ = graph_for(session, clinic, make_handler(booking_planner(doctor(session).id)))
-    send(g, "t1", "Book me. Neha Rao, 30, 9123456789")
-    answer(g, "t1", "yes")                                  # consent
-    out = answer(g, "t1", "no")                             # but not the booking
-    assert "book:PATIENT_DECLINED" in out["reply"]
-    patient = session.scalar(select(m.Patient).where(m.Patient.phone == "9123456789"))
-    statuses = session.scalars(select(m.Appointment.status).where(m.Appointment.patient_id == patient.id)).all()
-    assert "confirmed" not in statuses
 
 
 # ------------------------------------------------------------------ changes to existing appointments
@@ -215,21 +147,6 @@ def test_reschedule_with_confirmation(session, clinic):
 
 
 # ------------------------------------------------------------------ durability, limits, misc
-def test_paused_confirmation_survives_a_restart(session, clinic, tmp_path):
-    path = str(tmp_path / "cp.db")
-    handler = make_handler(booking_planner(doctor(session).id))
-    g1, _ = graph_for(session, clinic, handler, SqliteSaver(sqlite3.connect(path, check_same_thread=False)))
-    send(g1, "t1", "Book me. Neha Rao, 30, 9123456789")
-    answer(g1, "t1", "yes")                                 # consent → now waiting on the booking confirmation
-    del g1                                                  # "server restart"
-
-    g2, _ = graph_for(session, clinic, handler, SqliteSaver(sqlite3.connect(path, check_same_thread=False)))
-    q = pending_interrupt(g2, "t1")
-    assert q and q["kind"] == "confirm" and "Dr. Ananya Rao" in q["summary"]
-    out = answer(g2, "t1", "yes")
-    assert "book:ok" in out["reply"]
-
-
 def test_tool_rounds_are_bounded(session, clinic):
     calls = {"n": 0}
 
@@ -278,52 +195,7 @@ def test_is_yes(value, expected):
     assert is_yes(value) is expected
 
 
-# ------------------------------------------------------------------ regressions from the first live run (DEVLOG #27)
-def test_no_consent_card_for_details_the_patient_never_typed(session, clinic):
-    """Live run: the agent called register_patient before the patient gave any details."""
-    g, _ = graph_for(session, clinic, make_handler(lambda done: None if done else ("register_patient", NEW_PATIENT)))
-    out = send(g, "r1", "I'd like to book with Dr. Rao tomorrow morning. I'm a new patient")
-    assert out["interrupt"] is None and "register_patient:MISSING_DETAILS" in out["reply"]
-    assert session.scalar(select(func.count()).select_from(m.Patient)) == 60
-
-
-def test_consent_is_asked_only_once_per_conversation(session, clinic):
-    """Live run: consent was asked twice."""
-    def plan(done):
-        regs = [r for n, r in done if n == "register_patient"]
-        return ("register_patient", NEW_PATIENT) if not regs else None
-    g, _ = graph_for(session, clinic, make_handler(plan))
-    out = send(g, "r2", "New patient. Neha Rao, 30, 9123456789")
-    assert out["interrupt"]["kind"] == "consent"
-    assert "register_patient:ok" in answer(g, "r2", "yes")["reply"]
-    out = send(g, "r2", "Neha Rao, 30, 9123456789 again")                 # agent registers again next turn
-    assert out["interrupt"] is None and "register_patient:ok" in out["reply"]
-
-
-def test_hold_goes_straight_to_the_confirmation_card(session, clinic):
-    """Live run: the agent held a slot and asked for a typed 'yes'; the booking never happened."""
-    rao = doctor(session)
-
-    def plan(done):
-        names = [n for n, _ in done]
-        if "register_patient" not in names:
-            return ("register_patient", NEW_PATIENT)
-        if "find_slots" not in names:
-            return ("find_slots", {"appointment_type": "new", "doctor_id": rao.id, "date": "tomorrow"})
-        if "hold_slot" not in names:
-            slot = last(done, "find_slots")["slots"][0]
-            return ("hold_slot", {"doctor_id": rao.id, "start": slot["start"], "appointment_type": "new"})
-        return None                                                        # never calls book itself
-    g, _ = graph_for(session, clinic, make_handler(plan))
-    send(g, "r3", "Book Dr. Rao tomorrow. Neha Rao, 30, 9123456789")
-    q = answer(g, "r3", "yes")["interrupt"]                                # consent → confirmation card
-    assert q["kind"] == "confirm" and q["action"] == "book" and "Dr. Ananya Rao" in q["summary"]
-    out = answer(g, "r3", "yes")
-    assert "book:ok" in out["reply"]
-    patient = session.scalar(select(m.Patient).where(m.Patient.phone == "9123456789"))
-    assert session.scalar(select(m.Appointment.status).where(m.Appointment.patient_id == patient.id)) == "confirmed"
-
-
+# ------------------------------------------------------------------ reply checks (DEVLOG #27)
 def test_false_booking_claim_is_replaced(session, clinic):
     """Live run: 'yes' was treated as smalltalk and the reply writer said 'successfully booked'."""
     replies = []

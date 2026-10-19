@@ -13,14 +13,16 @@ from app.graphs.clinicdesk import build_graph
 from app.main import app
 from app.seed import seed
 from tests.fakes import FakeClient
-from tests.test_graph import booking_planner, make_handler
+from tests.test_booking_flow import Fake
 
 
 @pytest.fixture
 def client(session, monkeypatch):
     seed(session)
-    rao = session.scalar(select(m.Doctor).where(m.Doctor.name == "Dr. Ananya Rao"))
-    router = ModelRouter(FakeClient(make_handler(booking_planner(rao.id))), tiers=load_tiers(), ledger=MemoryLedger())
+    fake = Fake({"Book me with Dr. Rao. Neha Rao, 30, 9123456789":
+                 {"intent": "book", "doctor": "Dr. Rao", "name": "Neha Rao", "age": 30, "phone": "9123456789"},
+                 "1": {"intent": "book", "option": 1}})
+    router = ModelRouter(FakeClient(fake), tiers=load_tiers(), ledger=MemoryLedger())
     monkeypatch.setattr(chat_api._Runtime, "graph", build_graph(router, chat_api._make_ctx, InMemorySaver()))
     chat_api._hits.clear()
     with TestClient(app) as c:
@@ -38,9 +40,11 @@ def test_booking_over_http(client, session):
     assert client.post("/chat/turn", json={"text": "hello?", "thread_id": tid}).status_code == 409   # answer first
 
     body = client.post("/chat/answer", json={"thread_id": tid, "approved": True}).json()
+    assert body["interrupt"] is None and "1. Dr. Ananya Rao" in body["reply"]
+    body = client.post("/chat/turn", json={"text": "1", "thread_id": tid}).json()
     assert body["interrupt"]["kind"] == "confirm" and "₹500" in body["interrupt"]["summary"]
     body = client.post("/chat/answer", json={"thread_id": tid, "approved": True}).json()
-    assert body["interrupt"] is None and "book:ok" in body["reply"]
+    assert body["interrupt"] is None and "✅ Booked: Dr. Ananya Rao" in body["reply"]
     assert client.post("/chat/answer", json={"thread_id": tid, "approved": True}).status_code == 409
     conv = session.scalar(select(m.Conversation).where(m.Conversation.thread_id == tid))
     assert conv is not None and conv.channel == "web"
