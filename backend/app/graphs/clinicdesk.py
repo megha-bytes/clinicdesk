@@ -42,6 +42,7 @@ from app import repo
 from app.agent.models import ModelRouter, ModelUnavailable
 from app.agent.tools import ToolContext, appt_summary, label, openai_tool_specs, parse_start, run_tool
 from app.graphs.booking_flow import flow_active, render, run_flow, unverified_times
+from app.graphs.language import detect as detect_language
 
 log = logging.getLogger(__name__)
 
@@ -310,7 +311,7 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         except ModelUnavailable:
             data = {}
         it = data.get("intent") if data.get("intent") in INTENTS else "info"
-        lang = data.get("language") if data.get("language") in LANG_NAMES else state.get("language", "en")
+        lang = detect_language(user, data.get("language"), state.get("language"))   # sticky (DEVLOG #35)
         upd = {"intent": it, "language": lang, "ext": data, "say": None,
                # a new patient turn: clear this turn's working memory
                "scratch": [], "tool_results": [], "rounds": 0, "pending": None}

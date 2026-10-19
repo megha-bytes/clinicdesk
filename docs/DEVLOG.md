@@ -41,6 +41,7 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 32 | Third live run (8:38 pm): "Nothing is free" for 5 turns (model filled date="today" after hours); picking "12:05 am" re-searched and lost the list; reply writer said invalid phone "looks good", wrote "[date] at [time]" placeholders and "one moment while I check" | Oct 19 | ✅ Fixed | Dates only if the patient said one; requested day → next days fallback; pick before re-search; booking replies from templates (no model) |
 | 33 | Replies too long for a phone call (user feedback) | Oct 19 | ✅ Fixed | Templates of 1–2 short lines; options list only when new; consent ≤ 30 words; other replies ≤ 2 sentences / 40 words |
 | 34 | Model invented `option: 1` from "I'm ehnas, my mobile is 7896578678" → "Got it: 9:50 AM" though no option was picked | Oct 19 | ✅ Fixed | Option numbers from the model are used only if the message itself says that number or an ordinal (first/pehla/ಮೊದಲ…) |
+| 35 | Reply language flipped mid-conversation: romanised Kannada read as Hindi; a bare phone number or "23" switched back to Hindi; consent shown in Hindi to a Kannada speaker | Oct 19 | ✅ Fixed | `language.py`: explicit request → script → romanised keywords → keep the conversation's language |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -476,6 +477,24 @@ desk> ✅ Booked: Dr. Ananya Rao, Tue 20 Oct, 11:45 AM, ₹500.
 - Whole booking: 3 patient messages, 2 taps, **~1.3 s per turn, ≈ $0.00015 in model cost**.
 - Picking by time ("come in at 11:45") switched the choice correctly.
 - Fix for #34: option numbers from the model only count if the message says them. Tests: **197 passed**.
+
+### 2026-10-19 (night) · Kannada live test → sticky reply language
+
+```
+you>  Naale Dr.Rao jothe appointment beku          → replied in Hindi (model: lang=hi)
+you>  kannada                                      → Kannada ✓
+you>  nanna hesaru henry                           → Kannada ✓
+you>  8739478947                                   → Hindi ✗ (number → model guessed hi)
+you>  kannada please                               → Kannada ✓
+you>  23                                           → consent notice in Hindi ✗
+```
+Each turn ~1.0 s, $0.00004–0.00005. The booking steps themselves worked (options, name, phone, age, consent).
+
+Fix: `app/graphs/language.py` decides the reply language in order: explicit request ("kannada please",
+"Hindi mein", "ಕನ್ನಡ") → script (Kannada/Devanagari letters) → romanised keywords (beku, naale, nanna, hesaru…
+vs chahiye, mujhe, kal, naam…) → otherwise keep the conversation's language (a clear English sentence
+switches to English). The model's guess is used only for the first message when nothing else decides.
+Tests: 14 new (incl. a replay of this conversation, consent shown in Kannada). **211 passed**.
 
 ---
 
