@@ -40,6 +40,7 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 31 | Second live booking still failed: 11-digit phone ignored ("noted"), reply writer invented tool calls and slots (year 2024), agent looped 9 calls on "3", patient asked to type "confirm" repeatedly | Oct 19 | ✅ Fixed | Bookings now a deterministic flow (`booking_flow.py`); model only extracts; options and confirmations shown verbatim; time check on replies |
 | 32 | Third live run (8:38 pm): "Nothing is free" for 5 turns (model filled date="today" after hours); picking "12:05 am" re-searched and lost the list; reply writer said invalid phone "looks good", wrote "[date] at [time]" placeholders and "one moment while I check" | Oct 19 | ✅ Fixed | Dates only if the patient said one; requested day → next days fallback; pick before re-search; booking replies from templates (no model) |
 | 33 | Replies too long for a phone call (user feedback) | Oct 19 | ✅ Fixed | Templates of 1–2 short lines; options list only when new; consent ≤ 30 words; other replies ≤ 2 sentences / 40 words |
+| 34 | Model invented `option: 1` from "I'm ehnas, my mobile is 7896578678" → "Got it: 9:50 AM" though no option was picked | Oct 19 | ✅ Fixed | Option numbers from the model are used only if the message itself says that number or an ordinal (first/pehla/ಮೊದಲ…) |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -454,6 +455,27 @@ desk> [CONSENT] We'll save your name, age and phone only for your appointments a
 ```
 Tests: **196 passed** on SQLite and Postgres (evening/no-date, full-day fallback, am/pm pick, invalid
 mobile, Hindi template, reply length).
+
+### 2026-10-19 (night) · First clean live booking (patch 08)
+
+```
+you>  Hi, I would like an appointment with Dr Rao
+desk> Free with Dr. Ananya Rao (₹500):
+      1. Tue 20 Oct, 9:50 AM / 2. Tue 20 Oct, 11:45 AM / 3. Tue 20 Oct, 12:15 PM
+      Reply with a number.
+      Your name and mobile number?                     [lightning 1332ms | $0.00004]
+you>  I'm ehnas, my mobile is 7896578678
+desk> Got it: Tue 20 Oct, 9:50 AM.                      ← invented pick (#34)
+      First visit? Your age, please.                   [lightning 1200ms | $0.00006]
+you>  Age : 23,  I want to come in at 11:45
+desk> [CONSENT] We'll save your name, age and phone only for your appointments at Sunrise Family Clinic. ...OK?  yes
+desk> [CONFIRM] Book Dr. Ananya Rao · Tue 20 Oct, 11:45 AM · New consultation · ₹500?  yes
+desk> ✅ Booked: Dr. Ananya Rao, Tue 20 Oct, 11:45 AM, ₹500.
+      Pay: http://localhost:8000/pay/<id>              [lightning 1277ms | $0.00005]
+```
+- Whole booking: 3 patient messages, 2 taps, **~1.3 s per turn, ≈ $0.00015 in model cost**.
+- Picking by time ("come in at 11:45") switched the choice correctly.
+- Fix for #34: option numbers from the model only count if the message says them. Tests: **197 passed**.
 
 ---
 

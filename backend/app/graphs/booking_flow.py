@@ -201,18 +201,34 @@ def clean_date(value: Any, ctx: ToolContext, text: str | None = None) -> str | N
     return d.isoformat()
 
 
+_ORDINALS = {
+    1: r"first|1st|pehl[ae]|pahl[ae]|modal(a|ane|aneya)|ಮೊದಲ|पहल",
+    2: r"second|2nd|d[ou]{1,2}sr[ae]|eradu|eradane|ಎರಡನೇ|दूसर",
+    3: r"third|3rd|t[ei]{1,2}sr[ae]|mooru|mooran[ae]|ಮೂರನೇ|तीसर",
+}
+
+
+def _says_number(text: str, n: int) -> bool:
+    """True if the message itself mentions option n (as a standalone number or an ordinal word)."""
+    if re.search(rf"(?<![\d:.]){n}(?![\d:.])", text):
+        return True
+    return bool(_ORDINALS.get(n) and re.search(_ORDINALS[n], text, re.I))
+
+
 def pick_option(offered: list[dict], ext: dict, text: str) -> dict | None:
     """The slot the patient chose: an option number, or a time that matches exactly one option."""
     if not offered:
         return None
     n = ext.get("option")
-    mm = _OPTION.match(text)
-    if mm:
-        n = int(mm.group(1))
     try:
         n = int(n) if n is not None else None
     except (TypeError, ValueError):
         n = None
+    if n is not None and not _says_number(text, n):      # the model invented a pick (DEVLOG #34)
+        n = None
+    mm = _OPTION.match(text)
+    if mm:
+        n = int(mm.group(1))
     if n is not None and 1 <= n <= len(offered):
         return offered[n - 1]
     said = _times(text)

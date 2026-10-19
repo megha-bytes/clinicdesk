@@ -288,3 +288,14 @@ def test_model_replies_are_phone_sized():
     out = shorten(long)
     assert out == "Our clinic is open Monday to Saturday. Dr. Rao sees patients 9 to 1."
     assert all(len(v.split()) <= 30 for v in CONSENT_TEXT.values())
+
+
+def test_invented_option_number_is_ignored():
+    """DEVLOG #34: 'I'm ehnas, my mobile is 7896578678' came back as option 1."""
+    offered = [{"label": "Dr. A · Tue 20 Oct, 9:50 AM · ₹500", "short": "Tue 20 Oct, 9:50 AM"},
+               {"label": "Dr. A · Tue 20 Oct, 11:45 AM · ₹500", "short": "Tue 20 Oct, 11:45 AM"}]
+    assert pick_option(offered, {"option": 1}, "I'm ehnas, my mobile is 7896578678") is None
+    assert pick_option(offered, {"option": 2}, "the second one please") is offered[1]
+    assert pick_option(offered, {"option": 2}, "dusra wala") is offered[1]
+    assert pick_option(offered, {"option": 1}, "option 1, I'm Asha") is offered[0]
+    assert pick_option(offered, {}, "Age : 23,  I want to come in at 11:45") is offered[1]
