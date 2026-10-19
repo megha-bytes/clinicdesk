@@ -30,6 +30,9 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 21 | Render builds only `backend/`, so `config/pricing.yaml` isn't in the container → live costs would silently be $0 | Oct 7 | ✅ Resolved | Model IDs and prices have defaults in code; YAML files override when present. Test `test_defaults_without_config_files` |
 | 22 | Token Factory might reject `chat_template_kwargs` (400) or JSON mode, which would make every fast-tier call fail and fall back | Oct 7 | ✅ Resolved (defensive) | On a 400/422 the router switches that model to the `/no_think` style and remembers; intent classification no longer relies on JSON mode (tolerant parsing) |
 | 23 | Token Factory prices are unverified (pricing page blocks automated access) | Oct 7 | 🟡 Check | Confirm Nano/Lightning/Super/Ultra prices in the Token Factory model catalog; update `DEFAULT_PRICES` + `config/pricing.yaml` before quoting costs |
+| 24 | No work between 8 and 18 Oct (Day 6 → Day 7) put the original timeline 11 days behind | Oct 19 | ⏸ Accepted | Compressed plan: two plan-days per evening, feature freeze Tue 27 Oct; see `ClinicDesk_Daily_Planner.md` |
+| 25 | Real-clinic pilot (real patients) no longer fits: needed owner sign-off by Oct 20 and safety sign-off by Oct 26 | Oct 19 | ⏸ Accepted | Replaced by a 30-min clinic walkthrough on demo data (Tue 27 Oct) + phone interviews; no real patient data |
+| 26 | Consent text exists in English and Hindi only; Kannada patients see the English notice | Oct 19 | 🟡 Watch | Add a Kannada version checked by a native speaker before the video |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -284,6 +287,36 @@ Problems found while building:
 - Prices unverified → Issue #23.
 
 Next (needs the real key, on the laptop): `py scripts/check_reasoning.py` and `py -m app.cli_chat`; results go here and decide Issues #2 and #3.
+
+### 2026-10-19 · Day 7: booking inside the graph
+
+Built:
+- **`ClinicDeskGraph` v2** (`app/graphs/clinicdesk.py`): `intent` → `agent` (Lightning picks tools) ⇄ `tools` → `confirm` (LangGraph `interrupt`) → `execute` → `agent` … → `respond` (Super). Smalltalk skips the agent.
+- **Consent enforced by the graph**: `register_patient` pauses with a fixed notice (English/Hindi); only the patient's answer counts, and the model's `consent=true` is ignored. Declined → nothing stored.
+- **Confirmation enforced by the graph**: `book`, `reschedule`, `cancel` pause with a summary built from the database ("Book Dr. Ananya Rao · Tue 20 Oct, 9:20 AM · New consultation · ₹500?"); only an explicit yes (yes / haan / हाँ / ಹೌದು …) runs them.
+- **Identity**: actions use the patient verified in this conversation (find_patient or register); a model-supplied `patient_id` is overwritten; no verification → `VERIFY_FIRST`. Payment links only for the verified patient's own appointments. Someone else's appointment → no confirmation card, `NOT_FOUND`.
+- **Durability**: checkpointer per thread (Postgres on Neon, SQLite locally); a paused confirmation resumes after a restart. Tested on SQLite and Postgres.
+- **Bounded**: max 8 tool steps per patient turn.
+- **`/chat` API**: `POST /chat/turn`, `POST /chat/answer`, `GET /chat/{thread}/pending`; 409 if a question is pending; per-IP rate limit (30 turns / 10 min) and daily model-spend cap from the cost ledger (`DAILY_SPEND_CAP_USD`, default $2). Usable from `/docs` on the live URL.
+- Each graph step opens and closes its own DB session (avoids exhausting Neon connections).
+- `cli_chat` shows consent/confirmation cards and asks yes/no.
+
+Tests: **177 passed** on SQLite and Postgres (21 new graph tests incl. faked consent, someone-else's id, restart; 5 API tests incl. 409, rate limit, spend cap).
+
+End-to-end over HTTP (running server + real OpenAI SDK + fake Token Factory):
+```
+turn:    {"interrupt":{"kind":"consent","action":"register_patient","summary":"To book appointments we store your name, age, phone number, language and a short reason for the visit, ... Do you agree?"}}
+consent: {"interrupt":{"kind":"confirm","action":"book","summary":"Book Dr. Ananya Rao · Tue 20 Oct, 9:20 AM · new · ₹500?"}}
+confirm: {"reply":"Booked with Dr. Ananya Rao on Tue 20 Oct, 9:20 AM. Pay ₹500 here: http://localhost:8096/pay/<id>"}
+db: [('confirmed', 'Live Patient', 500, 'pending')]
+ledger rows: [('lightning', 8), ('super', 1)]
+```
+(Card wording then changed from "· new ·" to "· New consultation ·".)
+
+Problems found while building:
+- First draft let `send_payment_link` work on any appointment id → restricted to the verified patient's own appointments (test added).
+- First draft opened a DB session per graph step and never closed it → steps now release their session.
+- Timeline slip → Issue #24; pilot → Issue #25; Kannada consent text → Issue #26.
 
 ---
 

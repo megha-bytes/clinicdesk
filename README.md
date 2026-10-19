@@ -61,7 +61,8 @@ uvicorn app.main:app --reload       # http://localhost:8000/health, docs at /doc
 # 5. Tests
 pytest
 
-# 6. Chat with the agent in the terminal (demo clinic, real Nemotron models)
+# 6. Chat with the agent in the terminal (demo clinic, real Nemotron models;
+#    consent and booking confirmations appear as yes/no questions)
 python -m app.cli_chat
 
 # 7. Which reasoning switch works on Token Factory + Hindi/Kannada latency per model
@@ -74,6 +75,15 @@ docker compose -f deploy/docker-compose.yml up --build
 # API http://localhost:8000/health · Jaeger http://localhost:16686
 # Visit http://localhost:8000/debug/trace, then find the span in Jaeger (phone numbers are redacted)
 ```
+
+## Try the live agent
+
+Open `https://clinicdesk-api.onrender.com/docs`:
+1. **POST /chat/turn** with `{"text": "What are Dr. Rao's timings?"}`.
+2. For a booking, keep the returned `thread_id`. When the response contains an `interrupt` (consent or a
+   booking confirmation), answer it with **POST /chat/answer** `{"thread_id": "...", "approved": true}`.
+
+The assistant can't register or book anything without those explicit answers; the graph enforces it.
 
 ## Licence
 [Apache-2.0](LICENSE)

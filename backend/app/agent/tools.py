@@ -50,6 +50,7 @@ class ToolContext:
     channel: Literal["web", "voice", "a2a", "staff"] = "web"
     conversation_id: str | None = None
     a2a_caller_id: str | None = None
+    owns_session: bool = False        # True when the caller wants the session closed after use
     _clinic: m.Clinic | None = None
 
     @property

@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import db
 from app.admin import router as admin_router
+from app.chat_api import router as chat_router
 from app.payments.routes import router as payments_router
 from app.settings import get_settings
 from app.telemetry import setup_telemetry, tracer
@@ -46,6 +47,7 @@ app.add_middleware(
 
 app.include_router(payments_router)
 app.include_router(admin_router)
+app.include_router(chat_router)
 
 
 @app.head("/", include_in_schema=False)
