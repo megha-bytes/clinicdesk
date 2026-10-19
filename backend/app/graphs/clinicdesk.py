@@ -13,6 +13,12 @@ Safety rules enforced by the graph, not the prompt
   (doctor, time, fee), never from model text, and run only on an explicit "yes".
 - **Identity**: tools that act on a patient use the patient verified *in this conversation*
   (via `find_patient` or `register_patient`); a model-supplied patient_id is overwritten.
+- **Real details only**: registration needs a name and phone number the patient actually typed.
+  Consent is asked once per conversation.
+- **Hold → confirmation card**: a successful hold immediately becomes a booking confirmation card,
+  so a booking can't stall waiting for a typed "yes".
+- **No false claims**: a reply that says something was booked/confirmed when no booking happened
+  this turn is regenerated, then replaced. Internal ids never reach the patient.
 - **Bounded**: at most MAX_TOOL_ROUNDS tool steps per patient turn.
 - **Durable**: with a checkpointer, a paused confirmation survives a server restart.
 """
@@ -52,7 +58,8 @@ Return ONLY a JSON object: {"intent": <one of %s>, "language": <"en" | "hi" | "k
 - info: timings, fees, doctors, address, availability questions
 - book / reschedule / cancel / queue (token or wait time) / pay
 - human: wants to talk to a person
-- smalltalk: greetings, thanks
+- smalltalk: greetings, thanks, goodbyes
+- A short answer (yes, no, a time, a number, an option) belongs to whatever the assistant's last message asked about.
 - other: anything else (including medical questions)
 Language is the language the patient wrote in (Hindi in Latin script counts as "hi").""" % (list(INTENTS),)
 
@@ -61,10 +68,10 @@ Decide which tools to call for the patient's latest message. You never write to 
 Workflow for appointments:
 1. Identify the patient: an existing patient → find_patient(phone, name). A new patient → register_patient
    with name, age, phone and language (the clinic will ask the patient for consent; just call it).
-   If you don't have these details yet, reply DONE so the receptionist can ask for them.
+   Use only details the patient actually typed. If any are missing, reply DONE so the receptionist asks.
 2. Find options: route_to_doctor (if no doctor named) → find_slots.
-3. When the patient has chosen an option, hold_slot with that exact `start`, then book with the hold_id.
-   The clinic asks the patient to confirm before booking; just call book.
+3. When the patient has chosen an option, hold_slot with that exact `start`. The clinic then shows the
+   patient a confirmation card and books it. Never ask the patient to type "yes" yourself.
 4. After booking, call send_payment_link.
 Reschedule/cancel/queue: identify the patient first, then use their appointment_id from find_patient.
 If the patient asks for a human, call handoff_to_staff. When nothing more is needed, reply with the word DONE.
@@ -78,6 +85,9 @@ Hard rules:
 - If you need details to continue (name, age, phone number, preferred day or time, which option), ask for them.
 - If a tool result says PATIENT_DECLINED, accept it politely. If it says VERIFY_FIRST, ask for phone number and name.
 - If slots are listed, offer them as a short numbered list.
+- Only say an appointment is booked, confirmed, moved or cancelled if a TOOL RESULT below shows it succeeded.
+- Don't mention clinic policies, documents to bring, arrival times or rules unless they are in TOOL RESULTS.
+- Never show ids (patient, hold or appointment ids).
 TOOL RESULTS (this turn):
 {tool_results}"""
 
@@ -98,6 +108,8 @@ class State(TypedDict, total=False):
     language: str
     patient_id: str | None       # verified in THIS conversation
     pending: dict | None         # gated call waiting for the patient: {"call", "kind", "summary"}
+    consented: bool              # patient agreed to the privacy notice in this conversation
+    hold_id: str | None          # an active hold waiting to be booked
     rounds: int
     reply: str
     conversation_id: str | None
@@ -109,6 +121,59 @@ def _parse_json(text: str) -> dict:
         return json.loads(m_.group(0)) if m_ else {}
     except json.JSONDecodeError:
         return {}
+
+
+_ID = re.compile(r"(?<![/\w])\*{0,2}[0-9a-f]{32}\*{0,2}(?![\w/])")
+_HEX = r"\**[0-9a-f]{32}\**"
+_ID_LINE = re.compile(r"^[ \t]*[-*•][^\n]*" + _HEX + r"[^\n]*(?:\n|$)", re.M)          # "- **Reference:** <id>"
+_ID_SENTENCE = re.compile(r"[^.!?\n]*\b(?:your|the)\s+(?:patient|hold|booking|appointment)\s+(?:id|reference)\s+is\s+"
+                          + _HEX + r"\W*?(?:[.!?]|$)", re.I | re.M)
+_ID_CLAUSE = re.compile(r"\s*(?:(?:under|with)\s+)?(?:(?:your|the|a)\s+)?(?:patient|hold|booking|appointment)?\s*"
+                        r"(?:id|reference|ref)\b\s*(?:is|:|#)?\s*" + _HEX, re.I)
+_CLAIM = re.compile(r"\b(?:successfully|has been|have been|is now|is|been)\s+(?:booked|confirmed|scheduled|rescheduled|cancel+ed)\b"
+                    r"|\bbooking (?:is )?confirmed\b|\bI(?:'ve| have) (?:booked|confirmed|cancel+ed|rescheduled)\b", re.I)
+SUCCESS_TOOLS = {"book", "reschedule", "cancel"}
+
+
+def scrub_ids(text: str) -> str:
+    """Remove internal 32-hex ids from patient-facing text (links like /pay/<id> are kept)."""
+    text = _ID_LINE.sub("", text)
+    text = _ID_SENTENCE.sub("", text)
+    text = _ID_CLAUSE.sub("", text)
+    text = _ID.sub("", text)
+    text = re.sub(r"[ \t]+([.,;:])", r"\1", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def false_claim(reply: str, tool_results: list[dict]) -> bool:
+    """True if the reply claims a booking/cancellation that no tool confirmed this turn."""
+    if not _CLAIM.search(reply or ""):
+        return False
+    for r in tool_results:
+        res = r.get("result") or {}
+        if r.get("tool") in SUCCESS_TOOLS and res.get("ok"):
+            return False
+        if r.get("tool") == "find_patient" and res.get("upcoming"):
+            return False
+    return True
+
+
+def _digits(text: str) -> str:
+    return re.sub(r"\D", "", text or "")
+
+
+def _typed_by_patient(args: dict, messages: list[dict]) -> str | None:
+    """Error message if the registration details weren't actually typed by the patient."""
+    said = " ".join(x["content"] for x in messages if x["role"] == "user")
+    phone = _digits(str(args.get("phone", "")))[-10:]
+    if len(phone) < 10 or phone not in _digits(said):
+        return "Ask the patient for their 10-digit phone number; don't guess it."
+    first = str(args.get("name", "")).split()[:1]
+    if not first or first[0].casefold() not in said.casefold():
+        return "Ask the patient for their name; don't guess it."
+    if not re.search(r"\b%d\b" % int(args.get("age", -1) or -1), said):
+        return "Ask the patient for their age; don't guess it."
+    return None
 
 
 def is_yes(value: Any) -> bool:
@@ -154,6 +219,22 @@ def _summary(ctx: ToolContext, call: dict, lang: str) -> tuple[str, str]:
     return "", ""
 
 
+def _public_result(result: dict) -> dict:
+    """Tool result without internal ids, for the reply writer."""
+    if not isinstance(result, dict):
+        return result
+    out = {}
+    for k, v in result.items():
+        if k == "id" or k.endswith("_id") or k == "next_step":
+            continue
+        if isinstance(v, list):
+            v = [_public_result(x) if isinstance(x, dict) else x for x in v]
+        elif isinstance(v, dict):
+            v = _public_result(v)
+        out[k] = v
+    return out
+
+
 def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkpointer=None):
     """`make_ctx` returns a ToolContext (DB session + clinic) for the current step."""
 
@@ -172,9 +253,11 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
     # ---------------------------------------------------------------- nodes
     def intent(state: State) -> State:
         user = next((x["content"] for x in reversed(state["messages"]) if x["role"] == "user"), "")
+        prev = next((x["content"] for x in reversed(state["messages"]) if x["role"] == "assistant"), "")
+        content = f"Assistant's last message: {prev[:300]}\nPatient: {user}" if prev else user
         try:
             res = router.chat("lightning", [{"role": "system", "content": INTENT_PROMPT},
-                                            {"role": "user", "content": user}],
+                                            {"role": "user", "content": content}],
                               purpose="intent", node="intent", conversation_id=state.get("conversation_id"),
                               max_tokens=60, temperature=0)
             data = _parse_json(res.content)
@@ -208,6 +291,7 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         scratch = list(state.get("scratch", []))
         results = list(state.get("tool_results", []))
         patient_id = state.get("patient_id")
+        hold_id = state.get("hold_id")
         pending = None
         calls = scratch[-1].get("tool_calls", []) if scratch else []
         for c in calls:
@@ -229,6 +313,17 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
                     args["patient_id"] = patient_id                     # never trust a model-supplied id
             elif name == "hold_slot" and patient_id:
                 args["patient_id"] = patient_id
+            elif name == "register_patient":
+                from app.agent.tools import RegisterPatientIn
+                try:
+                    RegisterPatientIn.model_validate({**args, "consent": True})
+                    problem = _typed_by_patient(args, state.get("messages", []))
+                except Exception:  # noqa: BLE001
+                    problem = "Ask the patient for their name, age and phone number."
+                if problem:
+                    out = {"ok": False, "error": "MISSING_DETAILS", "message": problem}
+                elif state.get("consented"):                            # already agreed in this conversation
+                    out = run_tool(name, {**args, "consent": True}, ctx)
             if out is None and name in GATED:
                 if pending is None:
                     pending = {"call": {"id": c["id"], "name": name, "args": args}}
@@ -236,10 +331,20 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
                 out = {"ok": False, "error": "ONE_AT_A_TIME", "message": "Only one action can be confirmed at a time."}
             if out is None:
                 out = run_tool(name, args, ctx)
-                if name in SETS_PATIENT and out.get("ok"):
-                    patient_id = out["patient_id"]
+            if name in SETS_PATIENT and out.get("ok"):
+                patient_id = out["patient_id"]
+            if name == "hold_slot" and out.get("ok"):
+                hold_id = out["hold_id"]
             results.append({"tool": name, "args": {k: v for k, v in args.items() if k != "phone"}, "result": out})
             scratch.append({"role": "tool", "tool_call_id": c["id"], "content": json.dumps(out, default=str)})
+        if pending is None and hold_id and patient_id and hold_id != state.get("hold_id"):
+            # A fresh hold: go straight to the booking confirmation card.
+            call = {"id": f"auto_book_{hold_id[:8]}", "name": "book",
+                    "args": {"hold_id": hold_id, "patient_id": patient_id}}
+            scratch.append({"role": "assistant", "content": None, "tool_calls": [
+                {"id": call["id"], "type": "function",
+                 "function": {"name": "book", "arguments": json.dumps({"hold_id": hold_id})}}]})
+            pending = {"call": call}
         if pending:
             kind, summary = _summary(ctx, pending["call"], state.get("language", "en"))
             if not kind:                                              # invalid target: let the tool explain why
@@ -250,7 +355,8 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
                 pending = None
             else:
                 pending.update(kind=kind, summary=summary)
-        return {"scratch": scratch, "tool_results": results, "patient_id": patient_id, "pending": pending}
+        return {"scratch": scratch, "tool_results": results, "patient_id": patient_id, "pending": pending,
+                "hold_id": hold_id}
 
     def confirm(state: State) -> State:
         """Pause for the patient. On resume, the answer decides whether the action runs."""
@@ -274,7 +380,12 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         patient_id = state.get("patient_id")
         if call["name"] in SETS_PATIENT and out.get("ok"):
             patient_id = out["patient_id"]
-        return {"scratch": [*state["scratch"], {"role": "tool", "tool_call_id": call["id"],
+        extra: dict = {}
+        if call["name"] == "register_patient" and p["approved"]:
+            extra["consented"] = True
+        if call["name"] == "book":
+            extra["hold_id"] = None
+        return {**extra, "scratch": [*state["scratch"], {"role": "tool", "tool_call_id": call["id"],
                                                 "content": json.dumps(out, default=str)}],
                 "tool_results": [*state["tool_results"], {"tool": call["name"],
                                                           "args": {k: v for k, v in args.items() if k != "phone"},
@@ -282,24 +393,40 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
                 "patient_id": patient_id, "pending": None}
 
     def respond(state: State, ctx: ToolContext) -> State:
-        facts = json.dumps([{"tool": r["tool"], "result": r["result"]} for r in state.get("tool_results", [])],
+        results = state.get("tool_results", [])
+        facts = json.dumps([{"tool": r["tool"], "result": _public_result(r["result"])} for r in results],
                            ensure_ascii=False, default=str)
         system = RESPOND_PROMPT.format(clinic=ctx.clinic.name, tool_results=facts,
                                        language=LANG_NAMES.get(state.get("language", "en"), "English"))
-        try:
-            res = router.chat("super", [{"role": "system", "content": system}, *state["messages"][-8:]],
-                              purpose="reply", node="respond", conversation_id=state.get("conversation_id"),
-                              max_tokens=400, temperature=0.3)
-            reply = res.content
-        except ModelUnavailable:
-            reply = ""
+        msgs = [{"role": "system", "content": system}, *state["messages"][-8:]]
+        reply = ""
+        for attempt in range(2):
+            try:
+                res = router.chat("super", msgs, purpose="reply", node="respond",
+                                  conversation_id=state.get("conversation_id"), max_tokens=400, temperature=0.3)
+                reply = res.content or ""
+            except ModelUnavailable:
+                reply = ""
+                break
+            if not false_claim(reply, results):
+                break
+            log.warning("reply claimed an action no tool confirmed; regenerating")
+            msgs = [*msgs, {"role": "assistant", "content": reply},
+                    {"role": "system", "content": "Nothing was booked, moved or cancelled in this turn. Rewrite "
+                     "the reply without claiming that; offer the next step instead."}]
+        else:
+            reply = ("I haven't booked anything yet. Shall I check the available times for you?"
+                     if false_claim(reply, results) else reply)
+        reply = scrub_ids(reply)
         if not reply:
             reply = "Sorry, I'm having trouble right now. Our clinic staff will help you shortly."
         return {"reply": reply, "messages": [{"role": "assistant", "content": reply}]}
 
     # ---------------------------------------------------------------- edges
     def after_intent(state: State) -> str:
-        return "agent" if state.get("intent") in DATA_INTENTS else "respond"
+        if state.get("intent") in DATA_INTENTS or state.get("hold_id"):
+            return "agent"
+        return "respond"
 
     def after_agent(state: State) -> str:
         last = state["scratch"][-1] if state.get("scratch") else {}

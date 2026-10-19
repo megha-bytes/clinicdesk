@@ -276,3 +276,80 @@ def test_model_outage_gives_safe_reply(session, clinic):
 ])
 def test_is_yes(value, expected):
     assert is_yes(value) is expected
+
+
+# ------------------------------------------------------------------ regressions from the first live run (DEVLOG #27)
+def test_no_consent_card_for_details_the_patient_never_typed(session, clinic):
+    """Live run: the agent called register_patient before the patient gave any details."""
+    g, _ = graph_for(session, clinic, make_handler(lambda done: None if done else ("register_patient", NEW_PATIENT)))
+    out = send(g, "r1", "I'd like to book with Dr. Rao tomorrow morning. I'm a new patient")
+    assert out["interrupt"] is None and "register_patient:MISSING_DETAILS" in out["reply"]
+    assert session.scalar(select(func.count()).select_from(m.Patient)) == 60
+
+
+def test_consent_is_asked_only_once_per_conversation(session, clinic):
+    """Live run: consent was asked twice."""
+    def plan(done):
+        regs = [r for n, r in done if n == "register_patient"]
+        return ("register_patient", NEW_PATIENT) if not regs else None
+    g, _ = graph_for(session, clinic, make_handler(plan))
+    out = send(g, "r2", "New patient. Neha Rao, 30, 9123456789")
+    assert out["interrupt"]["kind"] == "consent"
+    assert "register_patient:ok" in answer(g, "r2", "yes")["reply"]
+    out = send(g, "r2", "Neha Rao, 30, 9123456789 again")                 # agent registers again next turn
+    assert out["interrupt"] is None and "register_patient:ok" in out["reply"]
+
+
+def test_hold_goes_straight_to_the_confirmation_card(session, clinic):
+    """Live run: the agent held a slot and asked for a typed 'yes'; the booking never happened."""
+    rao = doctor(session)
+
+    def plan(done):
+        names = [n for n, _ in done]
+        if "register_patient" not in names:
+            return ("register_patient", NEW_PATIENT)
+        if "find_slots" not in names:
+            return ("find_slots", {"appointment_type": "new", "doctor_id": rao.id, "date": "tomorrow"})
+        if "hold_slot" not in names:
+            slot = last(done, "find_slots")["slots"][0]
+            return ("hold_slot", {"doctor_id": rao.id, "start": slot["start"], "appointment_type": "new"})
+        return None                                                        # never calls book itself
+    g, _ = graph_for(session, clinic, make_handler(plan))
+    send(g, "r3", "Book Dr. Rao tomorrow. Neha Rao, 30, 9123456789")
+    q = answer(g, "r3", "yes")["interrupt"]                                # consent → confirmation card
+    assert q["kind"] == "confirm" and q["action"] == "book" and "Dr. Ananya Rao" in q["summary"]
+    out = answer(g, "r3", "yes")
+    assert "book:ok" in out["reply"]
+    patient = session.scalar(select(m.Patient).where(m.Patient.phone == "9123456789"))
+    assert session.scalar(select(m.Appointment.status).where(m.Appointment.patient_id == patient.id)) == "confirmed"
+
+
+def test_false_booking_claim_is_replaced(session, clinic):
+    """Live run: 'yes' was treated as smalltalk and the reply writer said 'successfully booked'."""
+    replies = []
+
+    def handler(kw):
+        system = kw["messages"][0]["content"]
+        if "You classify messages" in system:
+            return msg(json.dumps({"intent": "smalltalk", "language": "en"}))
+        replies.append(1)
+        return msg("Great! Your appointment has been successfully booked. Patient ID: c04a9c9ed67b4179b92265b2e1fe57f4.")
+    g, _ = graph_for(session, clinic, handler)
+    out = send(g, "r4", "yes")
+    assert len(replies) == 2                                               # regenerated once, then replaced
+    assert "booked" not in out["reply"].replace("haven't booked", "") and "c04a9c9e" not in out["reply"]
+
+
+def test_ids_are_scrubbed_but_payment_links_kept():
+    from app.graphs.clinicdesk import scrub_ids
+    text = ("Thank you, John! Your patient ID is **c04a9c9ed67b4179b92265b2e1fe57f4**. "
+            "Pay here: https://x.onrender.com/pay/ff3097c84ae547d086b7f85ce247ec85 ok")
+    out = scrub_ids(text)
+    assert "c04a9c9e" not in out and "/pay/ff3097c84ae547d086b7f85ce247ec85" in out and out.startswith("Thank you")
+
+
+def test_real_booking_claim_is_allowed():
+    from app.graphs.clinicdesk import false_claim
+    assert false_claim("Your appointment has been booked.", [])
+    assert not false_claim("Your appointment has been booked.", [{"tool": "book", "result": {"ok": True}}])
+    assert not false_claim("Here are three times.", [])

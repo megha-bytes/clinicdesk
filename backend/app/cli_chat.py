@@ -47,8 +47,16 @@ def main() -> None:
     if key is None:
         sys.exit("TOKEN_FACTORY_API_KEY missing: add it to .env.local in the repo root.")
     Base.metadata.create_all(engine)
+    from sqlalchemy.exc import OperationalError
     with SessionLocal() as session:
-        info = seed(session)
+        try:
+            info = seed(session)
+        except OperationalError as e:
+            if s.database_url.startswith("sqlite") and ("no column" in str(e) or "no such column" in str(e)):
+                sys.exit("Your local database file was made by an older version of ClinicDesk.\n"
+                         "It only holds demo data: delete it and run this again:\n"
+                         "    del clinicdesk.db   (Windows)   or   rm clinicdesk.db")
+            raise
         clinic_id = info["clinic_id"]
         clinic = session.scalar(select(m.Clinic).where(m.Clinic.id == clinic_id))
         print(f"ClinicDesk · {clinic.name} (demo data). Type 'quit' to exit.\n")

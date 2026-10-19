@@ -391,7 +391,7 @@ def hold_slot(ctx: ToolContext, args: HoldSlotIn) -> dict:
     return ok(hold_id=row.id, doctor=doctor.name, when=label(held.start, ctx.tz), start=iso(held.start, ctx.tz),
               minutes=typ_row.minutes, fee_inr=typ_row.fee_inr,
               expires_at=iso(held.hold_expires_at, ctx.tz),
-              next_step="Read the details back and ask the patient to confirm before calling book.")
+              next_step="Call book with this hold_id now. The clinic shows the patient a confirmation card; never ask the patient to confirm in text.")
 
 
 def register_patient(ctx: ToolContext, args: RegisterPatientIn) -> dict:
