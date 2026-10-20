@@ -4,6 +4,7 @@
 
 Built for the **Nebius × NVIDIA Global AI Hackathon** (Best Apps and Agents track).
 <img width="601" height="862" alt="image" src="https://github.com/user-attachments/assets/69d23a06-2199-4bb7-a8d3-ba5d273d10f2" />
+<img width="865" height="560" alt="image" src="https://github.com/user-attachments/assets/76c237ec-29cf-47c9-b7c4-09f01358c0cf" />
 
 
 🚧 **Status:** in active development (Oct 2026).
