@@ -1,11 +1,12 @@
 import { clsx } from "clsx";
-import { RotateCcw, SendHorizontal } from "lucide-react";
+import { Phone, RotateCcw, SendHorizontal } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookedSlip, ConfirmSlip, ConsentCard, EmergencyScreen, TimeOptions } from "./Cards";
 import { ClinicPanel, useClinic } from "./ClinicPanel";
 import { tr } from "./i18n";
 import type { Lang, Message } from "./types";
 import { useConversation } from "./useConversation";
+import { CallScreen } from "../voice/CallScreen";
 
 const LANGS: { code: Lang; label: string; name: string }[] = [
   { code: "en", label: "EN", name: "English" },
@@ -36,7 +37,9 @@ function Bubble({ m }: { m: Message }) {
 }
 
 export default function PatientApp() {
-  const { state, say, answer, setLanguage, reset } = useConversation("en");
+  const conv = useConversation("en");
+  const { state, say, answer, setLanguage, reset } = conv;
+  const [calling, setCalling] = useState(false);
   const clinic = useClinic();
   const [draft, setDraft] = useState("");
   const [dismissed, setDismissed] = useState<string | null>(null);
@@ -69,6 +72,10 @@ export default function PatientApp() {
             <p className="text-[13px] leading-tight text-ink-soft">{tr("title", lang)}</p>
           </div>
           <LanguagePicker value={lang} onChange={setLanguage} />
+          <button type="button" onClick={() => setCalling(true)} aria-label={tr("call", lang)} title={tr("call", lang)}
+            className="grid h-9 w-9 place-items-center rounded-full bg-clinic-tint text-clinic-deep hover:bg-clinic hover:text-white">
+            <Phone className="h-[18px] w-[18px]" aria-hidden />
+          </button>
           {state.messages.length > 0 && (
             <button type="button" onClick={reset} aria-label={tr("newChat", lang)} title={tr("newChat", lang)}
               className="grid h-9 w-9 place-items-center rounded-full text-ink-soft hover:bg-page hover:text-ink">
@@ -80,6 +87,16 @@ export default function PatientApp() {
         <div ref={scroller} className="flex-1 overflow-y-auto px-4 py-5" aria-live="polite">
           <div className="flex flex-col gap-4">
             <p className="max-w-[92%] text-[16px] leading-relaxed">{tr("welcome", lang)}</p>
+            {state.messages.length === 0 && (
+              <button type="button" onClick={() => setCalling(true)}
+                className="flex items-center gap-3 self-start rounded-2xl bg-clinic px-5 py-3.5 text-left text-white shadow-[0_8px_24px_-12px_rgba(15,110,99,.8)] hover:bg-clinic-deep">
+                <span className="grid h-10 w-10 place-items-center rounded-full bg-white/15"><Phone className="h-5 w-5" aria-hidden /></span>
+                <span>
+                  <span className="block text-[17px] font-semibold leading-tight">{tr("call", lang)}</span>
+                  <span className="block text-[14px] leading-tight text-white/80">English · हिन्दी · ಕನ್ನಡ</span>
+                </span>
+              </button>
+            )}
             {state.messages.length === 0 && (
               <div className="flex flex-wrap gap-2">
                 {suggestions.map((s) => (
@@ -128,6 +145,8 @@ export default function PatientApp() {
           </form>
         </footer>
       </main>
+
+      {calling && <CallScreen conv={conv} clinicName={clinic?.name ?? "Sunrise Family Clinic"} onClose={() => setCalling(false)} />}
 
       {emergency?.ui?.emergency && (
         <EmergencyScreen emergency={emergency.ui.emergency} text={emergency.text} lang={lang}

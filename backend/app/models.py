@@ -218,7 +218,7 @@ class LLMCall(Base):
     span_id: Mapped[str | None] = mapped_column(String(16))
     node: Mapped[str | None] = mapped_column(String(50))
     model: Mapped[str] = mapped_column(String(120))
-    tier: Mapped[str] = mapped_column(String(8))     # nano | super | ultra | omni
+    tier: Mapped[str] = mapped_column(String(16))    # lightning | nano | super | ultra (DEVLOG #45)
     purpose: Mapped[str | None] = mapped_column(String(50))
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)

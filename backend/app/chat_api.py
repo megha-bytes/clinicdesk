@@ -20,7 +20,9 @@ from datetime import datetime, time as dtime, timezone
 from threading import Lock
 
 import asyncio
+import contextvars
 import json
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -43,6 +45,10 @@ RATE_LIMIT = 30          # patient turns per IP …
 RATE_WINDOW_S = 600      # … per 10 minutes
 _hits: dict[str, deque] = defaultdict(deque)
 _lock = Lock()
+
+
+CHANNEL: contextvars.ContextVar[str] = contextvars.ContextVar("chat_channel", default="web")
+Channel = Literal["web", "voice"]
 
 
 class _Runtime:
@@ -82,7 +88,8 @@ def _demo_clinic_id(session) -> str:
 def _make_ctx() -> ToolContext:
     session = SessionLocal()                     # one short-lived session per graph step (closed by the graph)
     try:
-        return ToolContext(session=session, clinic_id=_demo_clinic_id(session), owns_session=True)
+        return ToolContext(session=session, clinic_id=_demo_clinic_id(session), owns_session=True,
+                           channel=CHANNEL.get())        # "voice": bookings show as phone/voice on the dashboard
     except Exception:
         session.close()
         raise
@@ -126,12 +133,14 @@ class TurnIn(BaseModel):
     text: str = Field(..., min_length=1, max_length=1000)
     thread_id: str | None = None
     language: str | None = Field(None, pattern="^(en|hi|kn)$", description="The app's language picker.")
+    channel: Channel = Field("web", description='"voice" when the text came from speech recognition (call screen).')
 
 
 class AnswerIn(BaseModel):
     thread_id: str
     approved: bool | None = None
     text: str | None = Field(None, max_length=1000, description="A typed answer instead of a yes/no tap.")
+    channel: Channel = "web"
 
     def answer(self) -> bool | str:
         if self.text and self.text.strip():
@@ -146,49 +155,63 @@ def demo_clinic_id() -> str:
         return _demo_clinic_id(s)
 
 
-def _conversation(thread_id: str | None) -> tuple[str, str]:
+def _conversation(thread_id: str | None, channel: str | None = None) -> tuple[str, str]:
+    """The conversation row (created on the first message). A conversation that switches to the call
+    screen is marked "voice"."""
     with SessionLocal() as s:
         if thread_id:
             conv = s.scalar(select(m.Conversation).where(m.Conversation.thread_id == thread_id))
             if conv is None:
                 raise HTTPException(404, "Unknown conversation.")
+            if channel == "voice" and conv.channel == "web":
+                conv.channel = "voice"
+                s.commit()
             return conv.thread_id, conv.id
-        conv = m.Conversation(clinic_id=_demo_clinic_id(s), channel="web")
+        conv = m.Conversation(clinic_id=_demo_clinic_id(s), channel=channel or "web")
         s.add(conv)
         s.commit()
         return conv.thread_id, conv.id
 
 
 def _public(thread_id: str, out: dict) -> dict:
-    return {"thread_id": thread_id, "reply": out["reply"], "interrupt": out["interrupt"], "ui": out.get("ui") or {},
+    return {"thread_id": thread_id, "reply": out["reply"], "speech": out.get("speech"), "interrupt": out["interrupt"], "ui": out.get("ui") or {},
             "intent": out["intent"], "language": out["language"], "tools": out["tools"]}
 
 
 @router.post("/turn", dependencies=[Depends(_guard)])
 def chat_turn(body: TurnIn) -> dict:
     graph = _Runtime.get()
-    thread_id, conv_id = _conversation(body.thread_id)
+    thread_id, conv_id = _conversation(body.thread_id, body.channel)
     if pending_interrupt(graph, thread_id):
         raise HTTPException(409, "Please answer the pending question first (POST /chat/answer).")
-    out = runner.run(graph, thread_id, text=body.text, conversation_id=conv_id, clinic_id=demo_clinic_id(),
-                     language=body.language)
+    token = CHANNEL.set(body.channel)
+    try:
+        out = runner.run(graph, thread_id, text=body.text, conversation_id=conv_id, clinic_id=demo_clinic_id(),
+                         language=body.language, voice=body.channel == "voice")
+    finally:
+        CHANNEL.reset(token)
     return _public(thread_id, out)
 
 
 @router.post("/answer", dependencies=[Depends(_guard)])
 def chat_answer(body: AnswerIn) -> dict:
     graph = _Runtime.get()
-    _conversation(body.thread_id)
+    _conversation(body.thread_id, body.channel)
     if not pending_interrupt(graph, body.thread_id):
         raise HTTPException(409, "There's no question waiting for an answer.")
-    out = runner.run(graph, body.thread_id, approved=body.answer(), clinic_id=demo_clinic_id())
+    token = CHANNEL.set(body.channel)
+    try:
+        out = runner.run(graph, body.thread_id, approved=body.answer(), clinic_id=demo_clinic_id(),
+                         voice=body.channel == "voice")
+    finally:
+        CHANNEL.reset(token)
     return _public(body.thread_id, out)
 
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
 
 
-def _stream_run(**kwargs) -> StreamingResponse:
+def _stream_run(channel: str = "web", **kwargs) -> StreamingResponse:
     """Run the graph in a worker thread and stream its events as AG-UI server-sent events."""
     async def gen():
         loop = asyncio.get_running_loop()
@@ -199,8 +222,9 @@ def _stream_run(**kwargs) -> StreamingResponse:
             loop.call_soon_threadsafe(q.put_nowait, ev)
 
         def work() -> None:
+            CHANNEL.set(channel)                  # this worker thread's own context (run_in_executor doesn't copy it)
             try:
-                runner.run(on_event=on_event, **kwargs)
+                runner.run(on_event=on_event, voice=channel == "voice", **kwargs)
             except Exception:  # noqa: BLE001 - already reported as a run.error event
                 pass
             finally:
@@ -219,20 +243,20 @@ def _stream_run(**kwargs) -> StreamingResponse:
 @router.post("/stream", dependencies=[Depends(_guard)])
 def chat_stream(body: TurnIn) -> StreamingResponse:
     graph = _Runtime.get()
-    thread_id, conv_id = _conversation(body.thread_id)
+    thread_id, conv_id = _conversation(body.thread_id, body.channel)
     if pending_interrupt(graph, thread_id):
         raise HTTPException(409, "Please answer the pending question first (POST /chat/answer/stream).")
-    return _stream_run(graph=graph, thread_id=thread_id, text=body.text, conversation_id=conv_id,
+    return _stream_run(channel=body.channel, graph=graph, thread_id=thread_id, text=body.text, conversation_id=conv_id,
                        clinic_id=demo_clinic_id(), language=body.language)
 
 
 @router.post("/answer/stream", dependencies=[Depends(_guard)])
 def chat_answer_stream(body: AnswerIn) -> StreamingResponse:
     graph = _Runtime.get()
-    _conversation(body.thread_id)
+    _conversation(body.thread_id, body.channel)
     if not pending_interrupt(graph, body.thread_id):
         raise HTTPException(409, "There's no question waiting for an answer.")
-    return _stream_run(graph=graph, thread_id=body.thread_id, approved=body.answer(), clinic_id=demo_clinic_id())
+    return _stream_run(channel=body.channel, graph=graph, thread_id=body.thread_id, approved=body.answer(), clinic_id=demo_clinic_id())
 
 
 @router.get("/{thread_id}/pending")

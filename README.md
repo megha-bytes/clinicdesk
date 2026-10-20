@@ -98,6 +98,24 @@ npm run dev                        # http://localhost:5173
 ```
 Live: `https://clinicdesk-app.onrender.com` (Render static site, see `deploy/render.yaml`).
 
+## Voice: call the clinic
+
+Phone calls are how most patients reach a clinic, so the patient app opens with **Call the clinic**.
+The call screen talks and listens in English, Hindi and Kannada, using the same LangGraph workflow,
+guardrails and cards as the chat:
+
+- **Listening**: the browser's speech recognition (`en-IN`, `hi-IN`, `kn-IN`; Chrome, Edge, Safari).
+  Spoken numbers become digits on the server (`app/voice/spoken.py`): "nine eight four five…",
+  "double seven", "दो नंबर", Devanagari and Kannada digits. "Yes please" / "haan ji" / "ಹೌದು" answers a card.
+- **Speaking**: every reply has a `speech` version written for the ear (`app/voice/speech.py`):
+  "tomorrow, 9:30 AM", "कल, सुबह 9:30", "500 ರೂಪಾಯಿ", "Option 1: …", "Say yes or no." No emoji, no links.
+- **Turn-taking**: greet → listen → think (live status) → speak → listen; tap the mic to interrupt.
+- **Tagged**: requests carry `channel: "voice"`, so bookings show a phone icon on the staff dashboard.
+- **Privacy**: in Chrome, speech recognition is done by Google's speech service; the screen says so and
+  tells callers never to say card numbers or OTPs (the payment guardrail also catches spoken card numbers).
+- **Swappable**: speech sits behind a small `SpeechEngine` interface (`frontend/src/voice/engine.ts`),
+  ready for a server-side provider. Kannada voices vary by device; without one, replies are shown on screen.
+
 ## Guardrails
 
 Every patient message passes **input rails** before anything else runs, and every model-written reply

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { API_URL, getJson } from "../realtime/api";
 import { postStream, StreamError } from "../realtime/sse";
-import type { Card, Lang, Message, RunResult } from "./types";
+import type { Card, Channel, Lang, Message, RunResult } from "./types";
 
 /**
- * The conversation engine shared by every way of talking to the clinic: the chat screen today,
- * the call screen (voice) later. It streams AG-UI events from the backend and keeps:
- * messages, the live status line, the card waiting for an answer, and errors.
+ * The conversation engine shared by every way of talking to the clinic: the chat screen and the
+ * call screen (voice). It streams AG-UI events from the backend and keeps: messages, the live status
+ * line, the card waiting for an answer, errors, and `spoken` — what a voice call should read out after
+ * each run (`n` changes on every run, so the call screen knows there is something new to say).
  */
 export interface State {
   threadId: string | null;
@@ -16,6 +17,7 @@ export interface State {
   busy: boolean;
   card: Card | null;
   error: "network" | "busy" | null;
+  spoken: { n: number; text: string } | null;
 }
 
 type Action =
@@ -34,7 +36,7 @@ let seq = 0;
 const nextId = () => `m${Date.now().toString(36)}${(seq++).toString(36)}`;
 
 export const initialState = (language: Lang = "en"): State => ({
-  threadId: null, language, messages: [], status: null, busy: false, card: null, error: null,
+  threadId: null, language, messages: [], status: null, busy: false, card: null, error: null, spoken: null,
 });
 
 export function reducer(state: State, a: Action): State {
@@ -59,7 +61,8 @@ export function reducer(state: State, a: Action): State {
         ? [...state.messages, { id: nextId(), role: "assistant" as const, text, ui: r.ui }]
         : state.messages;
       return { ...state, busy: false, status: null, card: r.interrupt ?? null, messages: msgs,
-               language: (r.language as Lang) || state.language };
+               language: (r.language as Lang) || state.language,
+               spoken: { n: (state.spoken?.n ?? 0) + 1, text: r.speech || text || r.interrupt?.summary || "" } };
     }
     case "error":
       return { ...state, busy: false, status: null, error: a.error };
@@ -115,23 +118,24 @@ export function useConversation(defaultLang: Lang = "en") {
     }
   }, []);
 
-  /** A message typed (or, later, spoken). If a card is waiting, it answers the card.
-   *  `display` is what the patient's bubble shows (e.g. the time they tapped instead of "2"). */
-  const say = useCallback((text: string, display?: string) => {
+  /** A message typed or spoken. If a card is waiting, it answers the card.
+   *  `display` is what the patient's bubble shows (e.g. the time they tapped instead of "2").
+   *  `channel` "voice" tells the backend the text came from speech recognition. */
+  const say = useCallback((text: string, display?: string, channel: Channel = "web") => {
     const s = stateRef.current;
     const clean = text.trim();
     if (!clean || s.busy) return;
     dispatch({ type: "user", text: clean, display });
-    if (s.card && s.threadId) return run("/chat/answer/stream", { thread_id: s.threadId, text: clean });
-    return run("/chat/stream", { text: clean, thread_id: s.threadId, language: s.language });
+    if (s.card && s.threadId) return run("/chat/answer/stream", { thread_id: s.threadId, text: clean, channel });
+    return run("/chat/stream", { text: clean, thread_id: s.threadId, language: s.language, channel });
   }, [run]);
 
   /** A tap on a card's button. */
-  const answer = useCallback((approved: boolean, label: string) => {
+  const answer = useCallback((approved: boolean, label: string, channel: Channel = "web") => {
     const s = stateRef.current;
     if (!s.card || !s.threadId || s.busy) return;
     dispatch({ type: "user", text: label });
-    return run("/chat/answer/stream", { thread_id: s.threadId, approved });
+    return run("/chat/answer/stream", { thread_id: s.threadId, approved, channel });
   }, [run]);
 
   const setLanguage = useCallback((language: Lang) => dispatch({ type: "language", language }), []);

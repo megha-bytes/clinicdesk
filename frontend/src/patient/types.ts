@@ -21,4 +21,7 @@ export interface Card { kind: "consent" | "confirm"; action: string; summary: st
 
 export interface Message { id: string; role: "user" | "assistant"; text: string; ui?: Ui }
 
-export interface RunResult { reply: string | null; interrupt: Card | null; ui?: Ui; language?: Lang | null }
+export interface RunResult { reply: string | null; speech?: string | null; interrupt: Card | null; ui?: Ui; language?: Lang | null }
+
+/** How the patient is talking to the clinic: typing (web) or the call screen (voice). */
+export type Channel = "web" | "voice";

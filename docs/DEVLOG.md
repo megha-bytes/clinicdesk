@@ -50,6 +50,9 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 41 | Laptop: `.env.local` line `OTEL_EXPORTER_OTLP_ENDPOINT=   # http://…` was read as the address → gRPC URI errors at startup | Oct 20 | ✅ Fixed | Comment-only values treated as empty; `.env.example` comment moved to its own line |
 | 42 | Downloaded `.patch` files and SQLite `-wal/-shm` files sitting untracked in the repo | Oct 20 | ✅ Fixed | Added to `.gitignore` |
 | 43 | First real A2A booking (laptop, real Nemotron, companion): worked end to end (consent + confirmation asked of the human, booked 11:15); but "tomorrow morning" offered 12:25 PM and 7:40 PM | Oct 20 | ✅ Fixed | For timed doctors a requested part of the day now limits the options when any slot fits (it was only a ranking preference) |
+| 44 | Voice: spoken replies said "rupee sign", "W-E-D" and read whole numbered lists; spoken yes ("yes please", "haan ji theek hai") declined the card; spoken numbers ("nine eight four…", "दो नंबर", Devanagari/Kannada digits) not understood | Oct 20 | ✅ Fixed | `app/voice/`: spoken numbers → digits before the graph, short spoken yes/no answers the card, every reply gets a `speech` version (dates/times/fees in the caller's language, "Option 1: …", "Say yes or no.") |
+| 45 | `llm_call.tier` is `VARCHAR(8)` but "lightning" has 9 letters: on Postgres (Neon) every Lightning cost row failed to save (logged, not raised), so cost panels and the daily spend cap under-counted | Oct 20 | ✅ Fixed | Column widened to 16 (migration `9c1e7a4b2d10`, runs on deploy); found by the staff-stats test on Postgres |
+| 46 | Kannada text-to-speech depends on the device: Chrome desktop has no Kannada voice (Edge and Android with the Google Kannada pack do) | Oct 20 | 🟡 Watch | Call screen shows replies on screen when there's no voice; option: server-side Indian-language TTS later (cut list #1) |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -693,6 +696,35 @@ numbers as floats ("1.0" wasn't read as option 1); companion resent details when
 input with no human now answers nothing instead of crashing.
 Tests: **423 passed** on SQLite and Postgres (9 A2A: card, bad key, full booking over A2A with source/caller/
 audit/dashboard checks, decline, emergency escalation, injection, per-caller rate limit, streaming, demo key).
+
+### 2026-10-20 · Day 19 (part 1): voice — "Call the clinic"
+
+Phone calls are how patients reach a clinic, so voice is the first modality. Built on the same conversation
+engine and graph as the chat; only the edges change.
+
+Frontend (`src/voice/`): a call screen (opened from the big "Call the clinic" button or the phone icon) with
+call timer, live captions, the caller's words as they speak, a mic button with listening/speaking states,
+barge-in (tap while the clinic speaks), mute, end call. Turn-taking: greet → listen → send → read the reply →
+listen again; silence twice or an emergency → wait for a tap. Cards and time buttons stay tappable during the
+call. Speech uses the browser's Web Speech API behind a small `SpeechEngine` interface (so an NVIDIA speech NIM
+or an Indian-language service can replace it): recognition in en-IN / hi-IN / kn-IN, synthesis with the best
+installed voice for the language; with no voice (Kannada on Chrome desktop) replies are shown in large text.
+The screen says the browser's speech service turns the voice into text, and never to say card numbers or OTPs.
+
+Backend: `channel: "voice"` on `/chat/*` → the conversation and bookings are tagged voice (phone icon on the
+dashboard). `app/voice/spoken.py` turns spoken numbers into digits (runs of ≥3 digit words incl. "double",
+romanised Hindi/Kannada digit words, native digits; a lone number word only when it is the whole utterance, so
+"kar do" stays) and reads short spoken yes/no answers to cards (anything with "but", a number or a new request
+→ handled as a new message, #37). `app/voice/speech.py` writes the `speech` text for every run: "today"/
+"tomorrow" in the caller's language, "सुबह 9:30" / "ಬೆಳಿಗ್ಗೆ 9:30", "500 रुपये", "Option 1: …. Say the option
+number.", cards as "Shall I book …? Say yes or no.", no emoji or links. `speech` is never sent to the ops channel.
+
+Checked in headless Chromium with a scripted speech API (English and Hindi): greeting → spoken request →
+options read out → "option one" → confirmation read out → "yes please" → booked slip, all with `channel: voice`.
+Layout fix during review: with a card on screen the call controls were pushed off a 390×844 screen → compact mic.
+Postgres run also caught #45 (Lightning cost rows not saved).
+Tests: backend **464 passed** on SQLite and Postgres (41 voice: numbers, yes/no, spoken replies, a full voice
+booking over SSE tagged voice, chat stays web, spoken card number still refused); frontend **13 passed**; red-team 60/60.
 
 ---
 

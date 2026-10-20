@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from langgraph.types import Command
@@ -17,6 +19,8 @@ from langgraph.types import Command
 from app.graphs.clinicdesk import _config, _outcome, is_no, is_yes
 from app.realtime.events import EventFactory, EventType
 from app.realtime.hub import hub, ops_channel, thread_channel
+from app.voice.speech import speak_card, to_speech
+from app.voice.spoken import normalise, short_answer
 
 STATUS = {
     "intent": {"en": "Reading your message…", "hi": "आपका संदेश पढ़ रहे हैं…", "kn": "ನಿಮ್ಮ ಸಂದೇಶ ಓದುತ್ತಿದ್ದೇವೆ…"},
@@ -41,7 +45,7 @@ CUSTOM_TO_TYPE = {
     "rail.fired": EventType.RAIL_FIRED, "emergency": EventType.EMERGENCY, "handoff": EventType.HANDOFF,
     "booking.changed": EventType.BOOKING_CHANGED,
 }
-PRIVATE_KEYS = {"reply", "ui"}          # the reply may contain patient details: never sent to the ops channel
+PRIVATE_KEYS = {"reply", "ui", "speech"}   # may contain patient details: never sent to the ops channel
 
 
 def status_text(key: str, lang: str, **kw: Any) -> str | None:
@@ -93,18 +97,47 @@ def ui_hints(values: dict) -> dict:
     return ui
 
 
+def clinic_today() -> date:
+    """The clinic's date (the demo clinic is in Bengaluru), for "today"/"tomorrow" in spoken replies."""
+    return datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+
+def spoken_reply(values: dict, out: dict) -> str:
+    """What a voice call reads out: the card as a yes/no question, or the full reply (with options) for the ear."""
+    lang = out.get("language") or values.get("language") or "en"
+    if out.get("interrupt"):
+        return speak_card(out["interrupt"], lang, clinic_today())
+    text = out.get("reply") or ""
+    say = values.get("say") or {}
+    if say:                                   # the chat text leaves options out; speech needs them
+        from app.graphs.booking_flow import render
+        text = render(say, lang)
+        if values.get("prefix"):
+            text = values["prefix"] + "\n" + text
+    return to_speech(text, lang, clinic_today())
+
+
 def run(graph, thread_id: str, *, text: str | None = None, approved: bool | str | None = None,
         conversation_id: str | None = None, clinic_id: str | None = None, language: str | None = None,
-        on_event: Callable[[dict], None] | None = None) -> dict:
+        on_event: Callable[[dict], None] | None = None, voice: bool = False) -> dict:
     """Run the graph for a new message (`text`) or an answer to a pending card (`approved`).
 
     An answer that is neither yes nor no ("No, I asked for 3, 9:10 AM") declines the card and is then
-    handled as a new message, so the patient's words aren't lost (DEVLOG #37)."""
+    handled as a new message, so the patient's words aren't lost (DEVLOG #37). A short spoken or typed
+    yes/no ("yes please", "haan ji theek hai") counts as the answer (DEVLOG #44).
+    `voice`: the text came from speech recognition, so spoken numbers become digits first."""
+    if text is not None:
+        text = normalise(text, voice=voice)
+    if text is None and isinstance(approved, str):
+        approved = normalise(approved, voice=voice)
+        plain = short_answer(approved)
+        if plain is not None:
+            approved = plain
     if (text is None and isinstance(approved, str) and approved.strip()
             and not is_yes(approved) and not is_no(approved)):
         run(graph, thread_id, approved=False, conversation_id=conversation_id, clinic_id=clinic_id, on_event=on_event)
         return run(graph, thread_id, text=approved.strip()[:1000], conversation_id=conversation_id,
-                   clinic_id=clinic_id, language=language, on_event=on_event)
+                   clinic_id=clinic_id, language=language, on_event=on_event, voice=voice)
     config = _config(thread_id)
     if text is not None:
         inp: Any = {"messages": [{"role": "user", "content": text}]}
@@ -171,7 +204,8 @@ def run(graph, thread_id: str, *, text: str | None = None, approved: bool | str 
         result["__interrupt__"] = interrupts
     out = _outcome(result)
     out["ui"] = ui_hints(values) if not interrupts else {}
-    send(EventType.RUN_FINISHED, reply=out["reply"], interrupt=out["interrupt"], ui=out["ui"], intent=out["intent"],
+    out["speech"] = spoken_reply(values, out)
+    send(EventType.RUN_FINISHED, reply=out["reply"], speech=out["speech"], interrupt=out["interrupt"], ui=out["ui"], intent=out["intent"],
          language=out["language"], cost_usd=round(totals["cost_usd"], 6), model_calls=totals["calls"],
          total_ms=round((time.perf_counter() - t0) * 1000))
     out["cost_usd"], out["total_ms"] = round(totals["cost_usd"], 6), round((time.perf_counter() - t0) * 1000)
