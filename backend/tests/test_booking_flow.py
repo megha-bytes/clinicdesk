@@ -362,3 +362,26 @@ def test_typed_answer_to_a_card_changes_the_choice(session, clinic):
     assert first_hold["summary"] != out["interrupt"]["summary"]
     held = session.scalars(select(m.Appointment.status).where(m.Appointment.status == "held")).all()
     assert len(held) == 1                                                    # the declined hold was released
+
+
+# ------------------------------------------------------------------ first browser run (DEVLOG #38)
+def test_returning_patient_only_when_they_say_so():
+    d, _ = merge_details({}, {"new_patient": False, "name": "Firdauz", "phone": "7890987898"},
+                         "My name is Firdauz and mobile is 7890987898")
+    assert "new_patient" not in d
+    d, _ = merge_details({}, {}, "3, not my first visit")
+    assert d["new_patient"] is False
+    d, _ = merge_details({}, {}, "I'm a new patient")
+    assert d["new_patient"] is True
+
+
+def test_got_it_is_said_once(session, clinic):
+    fake = Fake({"Dr. Rao tomorrow": {"intent": "book", "doctor": "Dr. Rao", "date": "tomorrow"},
+                 "1": {"intent": "book", "option": 1},
+                 "My name is Firdauz and mobile is 7890987898": {"intent": "book", "name": "Firdauz",
+                                                                "phone": "7890987898", "new_patient": False}})
+    g, _ = graph_for(session, clinic, fake)
+    send(g, "t", "Dr. Rao tomorrow")
+    assert send(g, "t", "1")["reply"].startswith("Got it:")
+    out = send(g, "t", "My name is Firdauz and mobile is 7890987898")
+    assert out["reply"] == "First visit? Your age, please."

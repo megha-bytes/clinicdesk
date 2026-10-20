@@ -44,6 +44,8 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 35 | Reply language flipped mid-conversation: romanised Kannada read as Hindi; a bare phone number or "23" switched back to Hindi; consent shown in Hindi to a Kannada speaker | Oct 19 | ✅ Fixed | `language.py`: explicit request → script → romanised keywords → keep the conversation's language |
 | 36 | NeMo Guardrails 0.24.1 requires Python < 3.14; laptop runs 3.14 | Oct 19 | ⏸ Accepted | Installed only on < 3.14 (container 3.12, CI 3.12). Same actions run directly on 3.14; tests cover both engines. Optional: install Python 3.13 locally |
 | 37 | Fourth live run: "3, not my first visit" held option **1** ("first" read as an ordinal pick), "3." not picked, age 3 stored, phone digits read as a date (re-search), typed answer to the card lost | Oct 20 | ✅ Fixed | Ordinals only as picks ("the first one"), leading "3."/"3," picks, age needs an age word or our question and never the picked number, digits ≠ date, dates normalised to ISO, not-found message, typed card answer → decline + new message, declined hold released |
+| 38 | First browser run (laptop, real Nemotron): "I couldn't find Firdauz…" though she never said she'd visited (model guessed new_patient=false); "Got it: <time>" repeated every turn | Oct 20 | ✅ Fixed | Returning/new patient only from her own words; "Got it" only on the turn the time is picked |
+| 39 | `npm install` on the laptop: 6 audit findings (dev tools: Vite 6.0, esbuild, Vitest 2); npm 10 crashes resolving Vitest 4/5 peers | Oct 20 | ✅ Fixed | Vite 8.3.2, Vitest 4.1.11, plugin-react 6.1.2, Tailwind 4.3.3, jsdom 30; lockfile made with npm 11; Node 24 pinned for CI/Render; `npm audit`: 0 vulnerabilities |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -616,6 +618,14 @@ emergency screen repeated its title as the first sentence → stripped; empty as
 Tests: backend **340 passed** (SQLite + Postgres, 6 new endpoint tests); frontend 6 unit tests (SSE parser,
 conversation reducer, opening hours). CI gains a frontend job (npm ci, test, build). Render: static site
 `clinicdesk-app` added to `deploy/render.yaml`; backend CORS must include its URL.
+
+### 2026-10-20 · First run in the browser (laptop)
+
+Setup on Windows: Node 24 installed; PowerShell blocked `npm.ps1` → `Set-ExecutionPolicy -Scope CurrentUser
+RemoteSigned`. Booking with Dr. Farah Khan in the app with real Nemotron: time buttons → pick 11:00 → name +
+phone → age → consent → confirmation worked. Two wording issues (#38) fixed; dependency audit (#39) fixed.
+Screens re-checked after the toolchain upgrade (identical); build time 2.6 s → 0.9 s.
+Tests: backend **342 passed**; frontend 6 passed; `npm audit`: 0 vulnerabilities.
 
 ---
 

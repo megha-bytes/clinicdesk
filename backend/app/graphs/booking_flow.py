@@ -27,6 +27,11 @@ from app.agent.tools import ToolContext, ToolFailure, normalise_phone, parse_day
 _PHONE_RUN = re.compile(r"(?<!\d)(?:\+?\d[\d\s-]{7,15}\d)(?!\d)")
 _AGE = re.compile(r"\b(?:age[d]?\s*(?:is\s*)?(\d{1,3})|(\d{1,3})\s*(?:years?|yrs?|y/?o|saal|साल|ವರ್ಷ)\b)", re.I)
 _LEAD = re.compile(r"^\s*(?:option\s*)?#?([1-9])\s*[.),:-](?!\d)")      # "3. my mobile is…", "3, not my…"
+_RETURNING = re.compile(r"not (my|the) first (visit|time)|been (here|there|before)|visited (before|earlier)|came (here )?before|"
+                        r"existing patient|old patient|regular patient|already (registered|a patient)|pehle (aa|aaya|aayi|bhi)|"
+                        r"purana (patient|mareez)|mundhe bandidde|munche bandidde|ಹಿಂದೆ ಬಂದಿದ್ದೆ|पहले आ|पुराना", re.I)
+_NEW = re.compile(r"\bnew patient\b|first (visit|time)(?! here before)|never been|naya (patient|mareez)|pehli baar|"
+                  r"modala bari|hosa (patient|rogi)|नया|पहली बार|ಮೊದಲ ಬಾರಿ|ಹೊಸ", re.I)
 _OPTION = re.compile(r"^\s*(?:option|no\.?|number|#)?\s*(\d)\s*[.)]?\s*(?:please|pls)?\s*$", re.I)
 _CLOCK = re.compile(r"\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?", re.I)
 _TODAY = re.compile(r"\b(today|tonight|aaj|ivattu|indu)\b|आज|ಇಂದು|ಇವತ್ತು", re.I)
@@ -171,8 +176,11 @@ def merge_details(details: dict, ext: dict, text: str, *, asked_age: bool = Fals
             age = cand
     if age is not None and 0 <= age <= 120 and str(age) != details.get("phone"):
         details["age"] = age
-    if ext.get("new_patient") is not None:
-        details["new_patient"] = bool(ext["new_patient"])
+    # "Existing patient" only when they say so; the model guessed it from nothing in a live run (DEVLOG #38).
+    if _RETURNING.search(text):
+        details["new_patient"] = False
+    elif _NEW.search(text):
+        details["new_patient"] = True
     return details, problems
 
 
@@ -485,7 +493,7 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
             say["problems"].append(("taken", {}))
             booking["offered"], booking["chosen"] = None, None
             _search(booking, state, ctx, results, say)
-    elif chosen and not patient_id:
+    elif chosen and not patient_id and choice:                  # say "Got it" once, on the turn they pick
         say["chosen"] = chosen.get("short", chosen["label"])
     elif booking.get("offered") and not say["options"] and not say["ask"] and not say["problems"]:
         say["options"] = booking["offered"]                     # remind only when there's nothing else to say

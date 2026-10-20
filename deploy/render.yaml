@@ -42,6 +42,8 @@ services:
     envVars:
       - key: VITE_API_URL
         value: https://clinicdesk-api.onrender.com
+      - key: NODE_VERSION
+        value: "24"
     routes:
       - type: rewrite
         source: /*
