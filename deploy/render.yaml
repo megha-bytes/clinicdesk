@@ -23,7 +23,7 @@ services:
       - key: TOKEN_FACTORY_API_KEY  # PROD key (not your laptop key)
         sync: false
       - key: CORS_ORIGINS           # the patient app's URL (comma-separated if several)
-        value: https://clinicdesk-app.onrender.com,http://localhost:5173
+        value: https://clinicdesk-7foy.onrender.com,http://localhost:5173
       - key: PUBLIC_BASE_URL        # builds the demo payment links
         value: https://clinicdesk-api.onrender.com
       - key: PAYMENT_PROVIDER
