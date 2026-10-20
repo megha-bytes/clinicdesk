@@ -1,0 +1,141 @@
+import { useCallback, useEffect, useReducer, useRef } from "react";
+import { API_URL, getJson } from "../realtime/api";
+import { postStream, StreamError } from "../realtime/sse";
+import type { Card, Lang, Message, RunResult } from "./types";
+
+/**
+ * The conversation engine shared by every way of talking to the clinic: the chat screen today,
+ * the call screen (voice) later. It streams AG-UI events from the backend and keeps:
+ * messages, the live status line, the card waiting for an answer, and errors.
+ */
+export interface State {
+  threadId: string | null;
+  language: Lang;
+  messages: Message[];
+  status: string | null;
+  busy: boolean;
+  card: Card | null;
+  error: "network" | "busy" | null;
+}
+
+type Action =
+  | { type: "restore"; threadId: string; messages: Message[]; card: Card | null; language: Lang }
+  | { type: "language"; language: Lang }
+  | { type: "user"; text: string; display?: string }
+  | { type: "started"; threadId: string }
+  | { type: "status"; text: string }
+  | { type: "card"; card: Card }
+  | { type: "finished"; result: RunResult }
+  | { type: "error"; error: "network" | "busy" }
+  | { type: "reset" };
+
+const STORAGE_KEY = "clinicdesk.thread";
+let seq = 0;
+const nextId = () => `m${Date.now().toString(36)}${(seq++).toString(36)}`;
+
+export const initialState = (language: Lang = "en"): State => ({
+  threadId: null, language, messages: [], status: null, busy: false, card: null, error: null,
+});
+
+export function reducer(state: State, a: Action): State {
+  switch (a.type) {
+    case "restore":
+      return { ...state, threadId: a.threadId, messages: a.messages, card: a.card, language: a.language };
+    case "language":
+      return { ...state, language: a.language };
+    case "user":
+      return { ...state, busy: true, error: null, status: null, card: null,
+               messages: [...state.messages, { id: nextId(), role: "user", text: a.display ?? a.text }] };
+    case "started":
+      return { ...state, threadId: a.threadId };
+    case "status":
+      return { ...state, status: a.text };
+    case "card":
+      return { ...state, card: a.card };
+    case "finished": {
+      const r = a.result;
+      const text = r.ui?.text !== undefined ? r.ui.text : r.reply ?? "";
+      const msgs = text || r.ui?.options || r.ui?.booked || r.ui?.emergency
+        ? [...state.messages, { id: nextId(), role: "assistant" as const, text, ui: r.ui }]
+        : state.messages;
+      return { ...state, busy: false, status: null, card: r.interrupt ?? null, messages: msgs,
+               language: (r.language as Lang) || state.language };
+    }
+    case "error":
+      return { ...state, busy: false, status: null, error: a.error };
+    case "reset":
+      return initialState(state.language);
+  }
+}
+
+function readStored(): string | null {
+  try { return localStorage.getItem(STORAGE_KEY); } catch { return null; }
+}
+function store(id: string | null) {
+  try { id ? localStorage.setItem(STORAGE_KEY, id) : localStorage.removeItem(STORAGE_KEY); } catch { /* private mode */ }
+}
+
+export function useConversation(defaultLang: Lang = "en") {
+  const [state, dispatch] = useReducer(reducer, initialState(defaultLang));
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  // Pick the conversation back up after a reload.
+  useEffect(() => {
+    const id = readStored();
+    if (!id) return;
+    getJson<{ messages: { role: "user" | "assistant"; content: string }[]; interrupt: Card | null; language: Lang }>(
+      `/chat/${id}/history`,
+    ).then((h) => dispatch({
+      type: "restore", threadId: id, card: h.interrupt, language: h.language || defaultLang,
+      messages: h.messages.map((m) => ({ id: nextId(), role: m.role, text: m.content })),
+    })).catch(() => store(null));
+  }, [defaultLang]);
+
+  const run = useCallback(async (path: string, body: Record<string, unknown>) => {
+    let last: RunResult | null = null;
+    try {
+      await postStream(`${API_URL}${path}`, body, (ev) => {
+        const t = ev.type as string;
+        if (t === "RUN_STARTED" && typeof ev.threadId === "string") {
+          store(ev.threadId);
+          dispatch({ type: "started", threadId: ev.threadId });
+        } else if (t === "CUSTOM" && ev.name === "status") {
+          dispatch({ type: "status", text: String((ev.value as { text?: string })?.text ?? "") });
+        } else if (t === "RUN_FINISHED") {
+          last = ev.result as RunResult;           // with a typed answer to a card, only the last run counts
+        } else if (t === "RUN_ERROR") {
+          throw new StreamError(500, String(ev.message ?? ""));
+        }
+      });
+      if (last) dispatch({ type: "finished", result: last });
+      else dispatch({ type: "error", error: "network" });
+    } catch (e) {
+      dispatch({ type: "error", error: e instanceof StreamError && e.status === 429 ? "busy" : "network" });
+    }
+  }, []);
+
+  /** A message typed (or, later, spoken). If a card is waiting, it answers the card.
+   *  `display` is what the patient's bubble shows (e.g. the time they tapped instead of "2"). */
+  const say = useCallback((text: string, display?: string) => {
+    const s = stateRef.current;
+    const clean = text.trim();
+    if (!clean || s.busy) return;
+    dispatch({ type: "user", text: clean, display });
+    if (s.card && s.threadId) return run("/chat/answer/stream", { thread_id: s.threadId, text: clean });
+    return run("/chat/stream", { text: clean, thread_id: s.threadId, language: s.language });
+  }, [run]);
+
+  /** A tap on a card's button. */
+  const answer = useCallback((approved: boolean, label: string) => {
+    const s = stateRef.current;
+    if (!s.card || !s.threadId || s.busy) return;
+    dispatch({ type: "user", text: label });
+    return run("/chat/answer/stream", { thread_id: s.threadId, approved });
+  }, [run]);
+
+  const setLanguage = useCallback((language: Lang) => dispatch({ type: "language", language }), []);
+  const reset = useCallback(() => { store(null); dispatch({ type: "reset" }); }, []);
+
+  return { state, say, answer, setLanguage, reset };
+}

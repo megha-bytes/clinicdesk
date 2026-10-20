@@ -36,3 +36,4 @@ traces.jsonl
 .DS_Store
 .idea/
 .vscode/
+*.tsbuildinfo

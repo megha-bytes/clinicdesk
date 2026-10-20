@@ -76,6 +76,25 @@ docker compose -f deploy/docker-compose.yml up --build
 # Visit http://localhost:8000/debug/trace, then find the span in Jaeger (phone numbers are redacted)
 ```
 
+## Patient app (frontend)
+
+React + Vite + TypeScript + Tailwind in `frontend/`. Chat with live status lines, tappable times, consent and
+confirmation cards, a printed-slip booking confirmation with a pay button, a full-screen emergency screen
+with tap-to-call, and English / हिन्दी / ಕನ್ನಡ. Built on the AG-UI stream, with one conversation engine
+(`useConversation`) that the voice call screen will reuse.
+
+Run it locally (two terminals):
+```bash
+# 1. backend (from backend/)
+python -m app.seed                 # load the demo clinic into the local database (once)
+python -m uvicorn app.main:app --reload
+
+# 2. app (from frontend/)
+npm install
+npm run dev                        # http://localhost:5173
+```
+Live: `https://clinicdesk-app.onrender.com` (Render static site, see `deploy/render.yaml`).
+
 ## Guardrails
 
 Every patient message passes **input rails** before anything else runs, and every model-written reply

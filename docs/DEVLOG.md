@@ -590,6 +590,33 @@ Asha with that number. Check it, or tell me your age to register."; a typed answ
 yes/no declines the card and is processed as a new message (`/chat/answer` accepts `text`); a declined
 hold is released at once. Tests: **334 passed** (replay of this conversation with the model's real output).
 
+### 2026-10-20 · Days 12–13: patient app
+
+Product decision (user): **a phone call will be the main way patients reach the clinic**; the chat UI comes
+first and voice follows. So the app is built around one conversation engine (`useConversation`: AG-UI stream,
+status line, cards, errors) that the call screen will reuse, every card can also be answered in words, and
+booking replies stay short.
+
+Backend additions for the app: confirmation cards carry structured `details` (doctor, time, visit type, fee,
+token); run results carry `ui` hints (option-free text, time options, booked slip data, emergency numbers,
+refusals, handoff); `language` hint from the picker (the message's own language still wins);
+`GET /chat/{id}/history` (resume after reload); `GET /chat/clinic` (side panel); `/chat/answer` takes `text`.
+
+Frontend (`frontend/`): React 18 + Vite 6 + TypeScript + Tailwind 4.1; Hind and Noto Sans Kannada bundled
+(no Google Fonts request on slow phones); 55 KB gzipped JS. Design: clinic green, mint-white page, the booking
+confirmation drawn as a paper appointment slip with a violet rubber stamp; red reserved for the emergency
+screen. Screens checked in headless Chromium at 360/390 px and 1280 px (English, Hindi, Kannada): welcome +
+suggestions, live status line, time buttons, consent card, confirmation slip, booked slip + pay, emergency
+screen (tap-to-call 108/112, "It isn't urgent" resumes), reload restores the conversation. No console errors.
+
+Problems found while building: Tailwind 4.0.0's Vite plugin crashed ("Cannot convert undefined or null to
+object") → 4.1.11; Google Fonts unreachable from the sandbox → bundled fonts (better for 4G anyway); the
+emergency screen repeated its title as the first sentence → stripped; empty assistant entries added gaps.
+
+Tests: backend **340 passed** (SQLite + Postgres, 6 new endpoint tests); frontend 6 unit tests (SSE parser,
+conversation reducer, opening hours). CI gains a frontend job (npm ci, test, build). Render: static site
+`clinicdesk-app` added to `deploy/render.yaml`; backend CORS must include its URL.
+
 ---
 
 ## How to add an entry

@@ -101,6 +101,7 @@ def _guard(request: Request) -> None:
 class TurnIn(BaseModel):
     text: str = Field(..., min_length=1, max_length=1000)
     thread_id: str | None = None
+    language: str | None = Field(None, pattern="^(en|hi|kn)$", description="The app's language picker.")
 
 
 class AnswerIn(BaseModel):
@@ -135,7 +136,7 @@ def _conversation(thread_id: str | None) -> tuple[str, str]:
 
 
 def _public(thread_id: str, out: dict) -> dict:
-    return {"thread_id": thread_id, "reply": out["reply"], "interrupt": out["interrupt"],
+    return {"thread_id": thread_id, "reply": out["reply"], "interrupt": out["interrupt"], "ui": out.get("ui") or {},
             "intent": out["intent"], "language": out["language"], "tools": out["tools"]}
 
 
@@ -145,7 +146,8 @@ def chat_turn(body: TurnIn) -> dict:
     thread_id, conv_id = _conversation(body.thread_id)
     if pending_interrupt(graph, thread_id):
         raise HTTPException(409, "Please answer the pending question first (POST /chat/answer).")
-    out = runner.run(graph, thread_id, text=body.text, conversation_id=conv_id, clinic_id=demo_clinic_id())
+    out = runner.run(graph, thread_id, text=body.text, conversation_id=conv_id, clinic_id=demo_clinic_id(),
+                     language=body.language)
     return _public(thread_id, out)
 
 
@@ -197,7 +199,7 @@ def chat_stream(body: TurnIn) -> StreamingResponse:
     if pending_interrupt(graph, thread_id):
         raise HTTPException(409, "Please answer the pending question first (POST /chat/answer/stream).")
     return _stream_run(graph=graph, thread_id=thread_id, text=body.text, conversation_id=conv_id,
-                       clinic_id=demo_clinic_id())
+                       clinic_id=demo_clinic_id(), language=body.language)
 
 
 @router.post("/answer/stream", dependencies=[Depends(_guard)])
@@ -214,6 +216,31 @@ def chat_pending(thread_id: str) -> dict:
     graph = _Runtime.get()
     _conversation(thread_id)
     return {"thread_id": thread_id, "interrupt": pending_interrupt(graph, thread_id)}
+
+
+@router.get("/clinic")
+def clinic_info() -> dict:
+    """Public facts for the app's side panel: name, address, doctors' hours, languages, emergency numbers."""
+    from app.guardrails.messages import DEFAULT_NUMBERS
+    with SessionLocal() as s:
+        c = s.get(m.Clinic, _demo_clinic_id(s))
+        doctors = s.scalars(select(m.Doctor).where(m.Doctor.clinic_id == c.id).order_by(m.Doctor.name)).all()
+        return {"name": c.name, "address": c.address, "languages": c.languages,
+                "emergency_numbers": {**DEFAULT_NUMBERS, **(c.emergency_numbers or {})},
+                "doctors": [{"name": d.name, "specialty": d.specialty, "hours": d.hours, "languages": d.languages}
+                            for d in doctors]}
+
+
+@router.get("/{thread_id}/history")
+def chat_history(thread_id: str) -> dict:
+    """The visible conversation so far (for the app after a reload) and any card waiting for an answer."""
+    graph = _Runtime.get()
+    _conversation(thread_id)
+    values = graph.get_state({"configurable": {"thread_id": thread_id}}).values or {}
+    msgs = [{"role": x["role"], "content": x["content"]} for x in values.get("messages", [])
+            if x.get("role") in ("user", "assistant") and x.get("content")]
+    return {"thread_id": thread_id, "messages": msgs[-50:], "language": values.get("language", "en"),
+            "interrupt": pending_interrupt(graph, thread_id)}
 
 
 @router.get("/{thread_id}/events")

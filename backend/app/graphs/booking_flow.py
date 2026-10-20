@@ -79,21 +79,22 @@ def t(key: str, lang: str, **kw: Any) -> str:
     return row.get(lang, row["en"]).format(**kw)
 
 
-def render(say: dict, lang: str) -> str:
-    """The patient-facing reply for one booking step."""
+def render(say: dict, lang: str, *, options: bool = True, booked: bool = True) -> str:
+    """The patient-facing reply for one booking step. The app draws options and the booked slip itself,
+    so it asks for the text without them (options=False, booked=False); voice and chat use the full text."""
     lines: list[str] = []
     if say.get("welcome"):
         lines.append(t("welcome_back", lang, name=say["welcome"]))
     for key, kw in say.get("problems", []):
         lines.append(t(key, lang, **kw))
-    if say.get("booked"):
+    if say.get("booked") and booked:
         b = say["booked"]
         lines.append(t("booked", lang, doctor=b["doctor"], when=b["when"], fee=b["fee_inr"]))
         if b.get("pay_url"):
             lines.append(t("pay", lang, url=b["pay_url"]))
     if say.get("chosen"):
         lines.append(t("chosen", lang, label=say["chosen"]))
-    if say.get("options"):
+    if say.get("options") and options:
         opts = say["options"]
         same_doc = len({o["doctor"] for o in opts if "doctor" in o}) == 1 and all("doctor" in o for o in opts)
         same_fee = len({o.get("fee_inr") for o in opts}) == 1 and opts[0].get("fee_inr") is not None
@@ -117,6 +118,8 @@ def render(say: dict, lang: str) -> str:
         lines.append(t("ask_age", lang))
     if "doctor" in ask:
         lines.append(t("ask_doctor", lang))
+    if not lines and (say.get("booked") or say.get("options")):
+        return ""
     return "\n".join(lines) or t("ask_doctor", lang)
 
 
@@ -378,7 +381,8 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
             pay = _log(results, "send_payment_link", {"appointment_id": appt["appointment_id"]},
                        run_tool("send_payment_link", {"appointment_id": appt["appointment_id"]}, ctx))
             say["booked"] = {"doctor": appt.get("doctor"), "when": appt.get("when"), "fee_inr": appt.get("fee_inr"),
-                             "pay_url": pay.get("url") if pay.get("ok") else None}
+                             "pay_url": pay.get("url") if pay.get("ok") else None, "token_no": appt.get("token_no"),
+                             "type": appt.get("appointment_type"), "start": appt.get("start")}
             return {"booking": {}, "tool_results": results, "say": say, "hold_id": None}
         booking["chosen"] = None
         if last["result"].get("error") == "PATIENT_DECLINED":

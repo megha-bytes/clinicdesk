@@ -1,0 +1,32 @@
+{
+  "name": "clinicdesk-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "clsx": "2.1.1",
+    "lucide-react": "0.468.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "@fontsource/hind": "5.2.8",
+    "@fontsource/noto-sans-kannada": "5.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.1.11",
+    "@testing-library/react": "16.1.0",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "jsdom": "25.0.1",
+    "tailwindcss": "4.1.11",
+    "typescript": "5.6.3",
+    "vite": "6.0.3",
+    "vitest": "2.1.8"
+  }
+}

@@ -22,11 +22,27 @@ services:
         sync: false
       - key: TOKEN_FACTORY_API_KEY  # PROD key (not your laptop key)
         sync: false
-      - key: CORS_ORIGINS           # your frontend URL once it exists (Day 12)
-        value: http://localhost:5173
+      - key: CORS_ORIGINS           # the patient app's URL (comma-separated if several)
+        value: https://clinicdesk-app.onrender.com,http://localhost:5173
       - key: PUBLIC_BASE_URL        # builds the demo payment links
         value: https://clinicdesk-api.onrender.com
       - key: PAYMENT_PROVIDER
         value: mock
       - key: DEMO_RESET_TOKEN       # long random string; also stored as a GitHub Actions secret
         sync: false
+
+  # Patient app (React, built to static files). Free static sites don't sleep.
+  - type: web
+    name: clinicdesk-app
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    autoDeploy: true
+    envVars:
+      - key: VITE_API_URL
+        value: https://clinicdesk-api.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

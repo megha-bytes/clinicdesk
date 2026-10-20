@@ -41,7 +41,7 @@ def to_agui(ev: dict) -> list:
                 out.append(TextMessageContentEvent(message_id=mid, delta=line + ("\n" if i < len(lines) - 1 else "")))
             out.append(TextMessageEndEvent(message_id=mid))
         out.append(RunFinishedEvent(thread_id=ev["thread_id"], run_id=ev["run_id"],
-                                    result={k: p.get(k) for k in ("reply", "interrupt", "intent", "language",
+                                    result={k: p.get(k) for k in ("reply", "interrupt", "ui", "intent", "language",
                                                                   "cost_usd", "model_calls", "total_ms")}))
         return out
     if t == "run.error":

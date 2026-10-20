@@ -137,6 +137,7 @@ class State(TypedDict, total=False):
     reply_override: str | None   # a fixed reply (emergency, refusal, handoff)
     handoff_summary: str | None
     held_ext: dict | None        # the request made together with an emergency warning
+    emergency_numbers: dict | None
     hold_id: str | None          # an active hold waiting to be booked
     rounds: int
     reply: str
@@ -316,6 +317,28 @@ def _public_result(result: dict) -> dict:
     return out
 
 
+def card_details(ctx: ToolContext, call: dict) -> dict:
+    """Structured fields for the confirmation card (the app draws a slip; voice reads `summary`)."""
+    name, args = call["name"], call["args"]
+    try:
+        if name == "book":
+            row = ctx.session.get(m.Appointment, args.get("hold_id", ""))
+        elif name in ("reschedule", "cancel"):
+            row = ctx.session.get(m.Appointment, args.get("appointment_id", ""))
+        else:
+            return {}
+        if row is None:
+            return {}
+        s = appt_summary(ctx, row)
+        out = {"action": name, "doctor": s["doctor"], "when": s["when"], "type": _type_label(s["appointment_type"]),
+               "fee_inr": s["fee_inr"], "token_no": row.token_no}
+        if name == "reschedule":
+            out["new_when"] = label(parse_start(args.get("new_start", ""), ctx), ctx.tz)
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkpointer=None):
     """`make_ctx` returns a ToolContext (DB session + clinic) for the current step."""
 
@@ -451,7 +474,7 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
                 scratch.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(out, default=str)})
                 pending = None
             else:
-                pending.update(kind=kind, summary=summary)
+                pending.update(kind=kind, summary=summary, details=card_details(ctx, pending["call"]))
         return {"scratch": scratch, "tool_results": results, "patient_id": patient_id, "pending": pending,
                 "hold_id": hold_id}
 
@@ -459,7 +482,7 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         """Pause for the patient. On resume, the answer decides whether the action runs."""
         p = state["pending"]
         answer = interrupt({"kind": p["kind"], "action": p["call"]["name"], "summary": p["summary"],
-                            "options": ["yes", "no"]})
+                            "details": p.get("details") or {}, "options": ["yes", "no"]})
         return {"pending": {**p, "approved": is_yes(answer)}}
 
     def execute(state: State, ctx: ToolContext) -> State:
@@ -505,6 +528,7 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         if v.kind == "emergency":
             out = run_tool("raise_emergency_alert", {"summary": f"emergency screen: {v.detail}"}, ctx, allow_hidden=True)
             numbers = out.get("numbers") if out.get("ok") else None
+            upd["emergency_numbers"] = numbers
             upd["reply_override"] = guard_msg("self_harm" if v.detail == "self_harm" else "emergency", lang, numbers)
             upd["tool_results"] = [{"tool": "raise_emergency_alert", "args": {}, "result": {"ok": out.get("ok")}}]
             upd["held_ext"] = {**ext, "intent": state.get("intent")}        # resume this request after "not urgent"
@@ -539,7 +563,7 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         if p:
             kind, summary = _summary(ctx, p["call"], state.get("language", "en"))
             if kind:
-                p.update(kind=kind, summary=summary)
+                p.update(kind=kind, summary=summary, details=card_details(ctx, p["call"]))
             else:
                 upd["pending"] = None
         else:

@@ -41,7 +41,7 @@ CUSTOM_TO_TYPE = {
     "rail.fired": EventType.RAIL_FIRED, "emergency": EventType.EMERGENCY, "handoff": EventType.HANDOFF,
     "booking.changed": EventType.BOOKING_CHANGED,
 }
-PRIVATE_KEYS = {"reply"}          # the reply may contain patient details: never sent to the ops channel
+PRIVATE_KEYS = {"reply", "ui"}          # the reply may contain patient details: never sent to the ops channel
 
 
 def status_text(key: str, lang: str, **kw: Any) -> str | None:
@@ -55,8 +55,46 @@ def status_text(key: str, lang: str, **kw: Any) -> str | None:
         return None
 
 
+def ui_hints(values: dict) -> dict:
+    """Structured data for the app's cards (time buttons, slip, emergency screen). Patient channel only."""
+    ui: dict = {}
+    say = values.get("say") or {}
+    if say:
+        from app.graphs.booking_flow import render, t
+        lang = values.get("language", "en")
+        ui["text"] = render(say, lang, options=False, booked=False)
+        if values.get("prefix"):
+            ui["text"] = (values["prefix"] + "\n" + ui["text"]).strip()
+        if say.get("options"):
+            opts = say["options"]
+            same_doc = len({o.get("doctor") for o in opts}) == 1
+            same_fee = len({o.get("fee_inr") for o in opts}) == 1
+            ui["options_title"] = t("options", lang, who=opts[0].get("doctor") if same_doc else say.get("who", ""),
+                                    fee=f" (₹{opts[0]['fee_inr']})" if same_fee and opts[0].get("fee_inr") else "")
+    if say.get("options"):
+        ui["options"] = [{"n": i, "when": o.get("short") or o.get("label"), "doctor": o.get("doctor"),
+                          "fee_inr": o.get("fee_inr")} for i, o in enumerate(say["options"], 1)]
+    if say.get("booked"):
+        ui["booked"] = say["booked"]
+    if say.get("chosen"):
+        ui["chosen"] = say["chosen"]
+    if say.get("ask"):
+        ui["ask"] = say["ask"]
+    guard = values.get("guard") or {}
+    if guard.get("kind") == "emergency":
+        from app.guardrails.messages import DEFAULT_NUMBERS
+        ui["emergency"] = {"kind": guard.get("detail"), "numbers": {**DEFAULT_NUMBERS,
+                                                                    **(values.get("emergency_numbers") or {})}}
+    elif guard.get("kind") in ("injection", "privacy", "medical"):
+        ui["refused"] = guard["kind"]
+    if any(r.get("tool") == "handoff_to_staff" and (r.get("result") or {}).get("ok")
+           for r in values.get("tool_results") or []):
+        ui["handoff"] = True
+    return ui
+
+
 def run(graph, thread_id: str, *, text: str | None = None, approved: bool | str | None = None,
-        conversation_id: str | None = None, clinic_id: str | None = None,
+        conversation_id: str | None = None, clinic_id: str | None = None, language: str | None = None,
         on_event: Callable[[dict], None] | None = None) -> dict:
     """Run the graph for a new message (`text`) or an answer to a pending card (`approved`).
 
@@ -66,10 +104,12 @@ def run(graph, thread_id: str, *, text: str | None = None, approved: bool | str 
             and not is_yes(approved) and not is_no(approved)):
         run(graph, thread_id, approved=False, conversation_id=conversation_id, clinic_id=clinic_id, on_event=on_event)
         return run(graph, thread_id, text=approved.strip()[:1000], conversation_id=conversation_id,
-                   clinic_id=clinic_id, on_event=on_event)
+                   clinic_id=clinic_id, language=language, on_event=on_event)
     config = _config(thread_id)
     if text is not None:
         inp: Any = {"messages": [{"role": "user", "content": text}]}
+        if language in ("en", "hi", "kn"):
+            inp["language"] = language            # the app's language picker: used unless the message says otherwise
         if conversation_id:
             inp["conversation_id"] = conversation_id
     else:
@@ -130,7 +170,8 @@ def run(graph, thread_id: str, *, text: str | None = None, approved: bool | str 
     if interrupts:
         result["__interrupt__"] = interrupts
     out = _outcome(result)
-    send(EventType.RUN_FINISHED, reply=out["reply"], interrupt=out["interrupt"], intent=out["intent"],
+    out["ui"] = ui_hints(values) if not interrupts else {}
+    send(EventType.RUN_FINISHED, reply=out["reply"], interrupt=out["interrupt"], ui=out["ui"], intent=out["intent"],
          language=out["language"], cost_usd=round(totals["cost_usd"], 6), model_calls=totals["calls"],
          total_ms=round((time.perf_counter() - t0) * 1000))
     out["cost_usd"], out["total_ms"] = round(totals["cost_usd"], 6), round((time.perf_counter() - t0) * 1000)
