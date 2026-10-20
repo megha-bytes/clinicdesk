@@ -56,6 +56,7 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 47 | Laptop, 9:35 pm: 2 staff tests failed (`StopIteration`): they looked for a confirmed visit *today*, but the seed marks today's earlier visits completed, so late in the evening none are left | Oct 20 | ✅ Fixed | Test-only: those tests use the next weekday. The app was fine; tests passed at 6 pm |
 | 48 | Anyone with a chat's `thread_id` could read its history (names, phone numbers) or answer its cards; the staff dashboard was protected only by one optional shared token in the URL | Oct 20 | ✅ Fixed | Day 21: staff accounts, sessions, roles, clinic scoping; per-conversation secret `X-Thread-Key`; WebSocket tickets; one-click demo roles |
 | 49 | Emergency and handoff alerts were saved without their conversation (tools got no `conversation_id`), so they couldn't be tied to a clinic or conversation | Oct 20 | ✅ Fixed | The graph passes the conversation to every tool step; found while scoping alerts to the staff member's clinic |
+| 50 | Live demo after midnight: "Sorry, I couldn't reach the clinic" on the first message after a pause; log: `psycopg.OperationalError: the connection is closed` in the LangGraph checkpointer | Oct 21 | ✅ Fixed | Neon closes idle connections; the checkpointer held one long-lived connection. Now a `psycopg_pool` pool that checks each connection before use (test kills all connections, then reads state) |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 

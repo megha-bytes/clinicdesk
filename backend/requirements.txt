@@ -4,6 +4,7 @@ pydantic-settings>=2.4
 sqlalchemy>=2.0
 alembic>=1.13
 psycopg[binary]>=3.2
+psycopg-pool>=3.2          # pooled, self-healing connections for the LangGraph checkpointer (DEVLOG #50)
 openai>=1.40
 langgraph>=1.0
 langgraph-checkpoint-sqlite>=3.0
