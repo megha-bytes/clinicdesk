@@ -21,13 +21,15 @@ export function parseSseChunk(buffer: string): { events: Record<string, unknown>
   return { events, rest };
 }
 
-export async function postStream(url: string, body: unknown, onEvent: SseHandler, signal?: AbortSignal): Promise<void> {
+export async function postStream(url: string, body: unknown, onEvent: SseHandler, signal?: AbortSignal,
+                                 headers: Record<string, string> = {}, onResponse?: (res: Response) => void): Promise<void> {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    headers: { "content-type": "application/json", accept: "text/event-stream", ...headers },
     body: JSON.stringify(body),
     signal,
   });
+  if (res.ok) onResponse?.(res);
   if (!res.ok || !res.body) {
     let detail = "";
     try {

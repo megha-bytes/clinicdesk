@@ -55,6 +55,19 @@ export default function PatientApp() {
 
   useEffect(() => { document.documentElement.lang = lang; }, [lang]);
 
+  // Judge scenarios (landing page): /app?lang=hi&say=… starts that conversation; ?call=1 opens the call screen.
+  const started = useRef(false);
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    const q = new URLSearchParams(window.location.search);
+    const l = q.get("lang");
+    if (l === "en" || l === "hi" || l === "kn") setLanguage(l);
+    const text = q.get("say");
+    if (text) setTimeout(() => say(text.slice(0, 500)), 300);
+    if (q.get("call") === "1") setCalling(true);
+  }, [say, setLanguage]);
+
   const suggestions = useMemo(() => [tr("suggestBook", lang), tr("suggestHours", lang), tr("suggestSkin", lang)], [lang]);
   const send = (text: string) => { say(text); setDraft(""); };
 

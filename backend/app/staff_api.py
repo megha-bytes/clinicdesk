@@ -6,7 +6,8 @@ GET  /ops/alerts                     emergencies and handoffs in the last 24 h (
 GET  /ops/graph                      the real ClinicDeskGraph topology for the Agent X-ray
 POST /ops/appointments/{id}/{action} staff actions: check-in | start | complete | no-show
 
-If STAFF_DASHBOARD_TOKEN is set, pass it as ?token=… .
+Every route needs a staff login (Authorization: Bearer …, see app/auth) and is scoped to that staff
+member's clinic. What each role may do is in app/auth.PERMS.
 """
 from __future__ import annotations
 
@@ -17,52 +18,57 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 
 from app import engine as eng
 from app.engine.queue import in_consultation
 from app import models as m
 from app import repo
-from app.chat_api import _demo_clinic_id
+from app.auth import Principal, require
 from app.db import SessionLocal
 from app.realtime.events import EventFactory, EventType
 from app.realtime.hub import hub, ops_channel
-from app.realtime.routes import _token_ok
 
 router = APIRouter(prefix="/ops", tags=["staff"])
 REDTEAM_DIR = Path(__file__).resolve().parents[1] / "redteam"
 
 
-def staff(token: str | None = Query(None)) -> None:
-    if not _token_ok(token):
-        raise HTTPException(401, "Staff token required.")
-
-
 def short_name(name: str | None) -> str:
-    """'Asha Reddy' → 'Asha R.' (the dashboard is publicly reachable in the demo)."""
+    """'Asha Reddy' → 'Asha R.' (used for one-click demo sessions, which anyone can open)."""
     if not name:
         return "Walk-in"
     parts = name.split()
     return parts[0] if len(parts) == 1 else f"{parts[0]} {parts[-1][0]}."
 
 
+def _name(name: str | None, user: Principal) -> str:
+    """Full names for real staff sessions; shortened ones for one-click demo sessions."""
+    return short_name(name) if user.demo or not name else name
+
+
 def _hhmm(dt: datetime, tz) -> str:
     return repo._aware(dt, tz).astimezone(tz).strftime("%H:%M")
 
 
-@router.get("/schedule", dependencies=[Depends(staff)])
-def schedule(day: date | None = None) -> dict:
+@router.get("/schedule")
+def schedule(day: date | None = None, user: Principal = Depends(require("schedule.all", "schedule.own"))) -> dict:
+    own_only = not user.can("schedule.all")                  # doctors see their own column only
     with SessionLocal() as s:
-        clinic = s.get(m.Clinic, _demo_clinic_id(s))
+        clinic = s.get(m.Clinic, user.clinic_id)
         tz = repo.clinic_tz(clinic)
         day = day or datetime.now(tz).date()
-        doctors = s.scalars(select(m.Doctor).where(m.Doctor.clinic_id == clinic.id).order_by(m.Doctor.name)).all()
+        dq = select(m.Doctor).where(m.Doctor.clinic_id == clinic.id)
+        if own_only:
+            dq = dq.where(m.Doctor.id == user.doctor_id)
+        doctors = s.scalars(dq.order_by(m.Doctor.name)).all()
         lo, hi = repo.day_bounds(day, tz)
-        rows = s.scalars(select(m.Appointment).where(
+        aq = select(m.Appointment).where(
             m.Appointment.clinic_id == clinic.id, m.Appointment.start >= lo, m.Appointment.start < hi,
             m.Appointment.status.in_(("held", "confirmed", "checked_in", "completed", "no_show")))
-            .order_by(m.Appointment.start)).all()
+        if own_only:
+            aq = aq.where(m.Appointment.doctor_id == user.doctor_id)
+        rows = s.scalars(aq.order_by(m.Appointment.start)).all()
         patients = {p.id: p for p in s.scalars(select(m.Patient).where(
             m.Patient.id.in_([r.patient_id for r in rows if r.patient_id]))).all()}
         types = {t.id: t for t in s.scalars(select(m.AppointmentType).where(
@@ -82,7 +88,7 @@ def schedule(day: date | None = None) -> dict:
         appts = [{
             "id": r.id, "doctor_id": r.doctor_id, "start": _hhmm(r.start, tz), "end": _hhmm(r.end, tz),
             "status": r.status, "source": r.source, "token_no": r.token_no, "urgent": r.urgent_by_staff,
-            "patient": short_name(patients[r.patient_id].name if r.patient_id in patients else None),
+            "patient": _name(patients[r.patient_id].name if r.patient_id in patients else None, user),
             "type": types[r.type_id].name if r.type_id in types else None,
             "booked_by_agent": r.id in by_agent, "in_consult": bool(r.started_at and r.status == "checked_in"),
         } for r in rows]
@@ -110,10 +116,10 @@ def redteam_results() -> dict:
     return out
 
 
-@router.get("/stats", dependencies=[Depends(staff)])
-def stats() -> dict:
+@router.get("/stats")
+def stats(user: Principal = Depends(require("stats"))) -> dict:
     with SessionLocal() as s:
-        clinic = s.get(m.Clinic, _demo_clinic_id(s))
+        clinic = s.get(m.Clinic, user.clinic_id)
         tz = repo.clinic_tz(clinic)
         lo, _ = repo.day_bounds(datetime.now(tz).date(), tz)
         calls = s.scalars(select(m.LLMCall).where(m.LLMCall.at >= lo)).all()
@@ -142,12 +148,14 @@ def stats() -> dict:
     }
 
 
-@router.get("/alerts", dependencies=[Depends(staff)])
-def alerts() -> dict:
+@router.get("/alerts")
+def alerts(user: Principal = Depends(require("alerts"))) -> dict:
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     with SessionLocal() as s:
+        convs = select(m.Conversation.id).where(m.Conversation.clinic_id == user.clinic_id)
         rows = s.scalars(select(m.GuardrailEvent).where(
-            m.GuardrailEvent.at >= since, m.GuardrailEvent.type.in_(("emergency", "handoff")))
+            m.GuardrailEvent.at >= since, m.GuardrailEvent.type.in_(("emergency", "handoff")),
+            m.GuardrailEvent.conversation_id.in_(convs))
             .order_by(m.GuardrailEvent.at.desc()).limit(30)).all()
         return {"alerts": [{"id": r.id, "type": r.type, "rail": r.rail, "detail": (r.detail or "")[:120],
                             "conversation_id": r.conversation_id, "at": repo._aware(r.at, timezone.utc).isoformat()}
@@ -164,7 +172,7 @@ STATIC_GRAPH = {
 }
 
 
-@router.get("/graph", dependencies=[Depends(staff)])
+@router.get("/graph", dependencies=[Depends(require("xray"))])
 def graph_topology() -> dict:
     """Nodes and edges straight from the compiled LangGraph (falls back to a static copy)."""
     try:
@@ -178,12 +186,20 @@ def graph_topology() -> dict:
 OPS = {"check-in": eng.check_in, "start": eng.start_consult, "complete": eng.complete}
 
 
-@router.post("/appointments/{appt_id}/{action}", dependencies=[Depends(staff)])
-def staff_action(appt_id: str, action: Literal["check-in", "start", "complete", "no-show"]) -> dict:
+NEEDS = {"check-in": "queue.checkin", "no-show": "queue.checkin", "start": "visit.run", "complete": "visit.run"}
+
+
+@router.post("/appointments/{appt_id}/{action}")
+def staff_action(appt_id: str, action: Literal["check-in", "start", "complete", "no-show"],
+                 user: Principal = Depends(require("queue.checkin", "visit.run"))) -> dict:
+    if not user.can(NEEDS[action]):
+        raise HTTPException(403, "Your role can't do that.")
     with SessionLocal() as s:
         row = s.get(m.Appointment, appt_id)
-        if row is None:
+        if row is None or row.clinic_id != user.clinic_id:          # another clinic's booking: doesn't exist for you
             raise HTTPException(404, "Unknown appointment.")
+        if user.role == "doctor" and row.doctor_id != user.doctor_id:
+            raise HTTPException(403, "That's another doctor's patient.")
         clinic = s.get(m.Clinic, row.clinic_id)
         tz = repo.clinic_tz(clinic)
         b = repo.to_engine_booking(row, tz)
@@ -198,7 +214,7 @@ def staff_action(appt_id: str, action: Literal["check-in", "start", "complete", 
         before = row.status
         repo.write_back(b, row)
         s.add(m.AuditLog(actor="staff", action=action, entity="appointment", entity_id=row.id,
-                         before={"status": before}, after={"status": row.status}))
+                         before={"status": before}, after={"status": row.status, "by": user.user_id}))
         s.commit()
         doctor = s.get(m.Doctor, row.doctor_id)
         payload = {"action": action, "appointment_id": row.id, "doctor": doctor.name, "status": row.status,

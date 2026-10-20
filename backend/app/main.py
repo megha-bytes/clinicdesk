@@ -12,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import db
 from app.admin import router as admin_router
+from app.auth.routes import router as auth_router
+from app.onboarding.routes import router as onboarding_router
 from app.chat_api import router as chat_router
 from app.realtime.routes import router as ops_router
 from app.staff_api import router as staff_router
@@ -36,6 +38,14 @@ async def lifespan(app: FastAPI):
     if s.app_env != "test":
         from app.guardrails import engine_name
         engine_name()                      # load NeMo Guardrails now, not on the first patient message
+        try:                               # OWNER_EMAIL + OWNER_PASSWORD → the clinic owner's account
+            from app.auth import ensure_owner_from_env
+            from app.chat_api import _demo_clinic_id
+            from app.db import SessionLocal
+            with SessionLocal() as session:
+                ensure_owner_from_env(session, _demo_clinic_id(session))
+        except Exception:  # noqa: BLE001 - e.g. the demo clinic isn't seeded yet
+            pass
     yield
 
 
@@ -47,14 +57,34 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Thread-Key", "X-Thread-Id"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    h = response.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("Referrer-Policy", "no-referrer")
+    h.setdefault("X-Frame-Options", "DENY")
+    path = request.url.path
+    if path.startswith("/pay/"):                     # the mock payment page: its own inline styles and form
+        h.setdefault("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+    elif path not in ("/docs", "/redoc", "/openapi.json"):
+        h.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        h.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
 app.include_router(payments_router)
 app.include_router(admin_router)
+app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(ops_router)
 app.include_router(staff_router)
+app.include_router(onboarding_router)
 
 try:                                     # A2A: /.well-known/agent-card.json and /a2a
     from app.a2a.server import mount_a2a

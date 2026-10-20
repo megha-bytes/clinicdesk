@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:8000"   # used to build mock payment links
     payment_provider: str = "mock"                    # mock | razorpay (test mode only)
 
+    demo_login_enabled: bool = False                  # one-click demo staff sessions for the public demo clinic
+    staff_session_hours: float = 12.0                 # absolute session lifetime
+    staff_idle_minutes: float = 120.0                 # sessions end after this long without a request
+
     otel_enabled: bool = True
     otel_service_name: str = "clinicdesk"
     otel_exporter_otlp_endpoint: str | None = None   # e.g. http://localhost:4317

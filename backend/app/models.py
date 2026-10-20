@@ -191,6 +191,7 @@ class Conversation(TimestampMixin, Base):
     channel: Mapped[str] = mapped_column(String(8), default="web")   # web | voice | a2a
     thread_id: Mapped[str] = mapped_column(String(64), unique=True, default=_id)
     a2a_context_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    thread_key_hash: Mapped[str | None] = mapped_column(String(64))   # sha256 of the browser's secret (DEVLOG #48)
     transcript_masked: Mapped[list] = mapped_column(JSON, default=list)
     handoff: Mapped[bool] = mapped_column(Boolean, default=False)
     emergency_flag: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -239,6 +240,36 @@ class OnboardingDraft(TimestampMixin, Base):
     review_notes: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(10), default="draft")  # draft | approved | rejected
     reviewed_by: Mapped[str | None] = mapped_column(String(100))
+
+
+# ------------------------------------------------------------------ staff accounts (Day 21)
+class StaffUser(TimestampMixin, Base):
+    __tablename__ = "staff_user"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    clinic_id: Mapped[str] = mapped_column(ForeignKey("clinic.id", ondelete="CASCADE"), index=True)
+    email: Mapped[str] = mapped_column(String(200), unique=True)
+    name: Mapped[str] = mapped_column(String(100))
+    role: Mapped[str] = mapped_column(String(12))                     # owner | receptionist | doctor
+    doctor_id: Mapped[str | None] = mapped_column(ForeignKey("doctor.id", ondelete="SET NULL"))
+    password_hash: Mapped[str] = mapped_column(String(200))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    demo: Mapped[bool] = mapped_column(Boolean, default=False)       # one-click demo account (no password login)
+    failed_logins: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (CheckConstraint("role IN ('owner','receptionist','doctor')", name="ck_staff_role"),)
+
+
+class StaffSession(Base):
+    __tablename__ = "staff_session"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("staff_user.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)  # sha256 of the bearer token; the token isn't stored
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AuditLog(Base):

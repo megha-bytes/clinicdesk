@@ -3,7 +3,7 @@ import asyncio
 import json
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.keys import KeyedClient as TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app import chat_api
@@ -165,9 +165,13 @@ def test_stream_refuses_when_a_card_is_pending(client):
     assert client.post("/chat/stream", json={"text": "hello", "thread_id": tid}).status_code == 409
 
 
-def test_staff_websocket_replays_and_streams(client):
+def test_staff_websocket_replays_and_streams(client, session):
+    from tests.keys import login_as
+    from app.chat_api import demo_clinic_id
     client.post("/chat/turn", json={"text": "I have severe chest pain"})
-    with client.websocket_connect("/ops/ws?after=0") as ws:
+    login_as(client, session, demo_clinic_id(), "owner")
+    ticket = client.post("/auth/ws-ticket").json()["ticket"]
+    with client.websocket_connect(f"/ops/ws?after=0&ticket={ticket}") as ws:
         got = []
         while True:
             ev = ws.receive_json()
@@ -179,10 +183,22 @@ def test_staff_websocket_replays_and_streams(client):
     assert [e["cursor"] for e in got] == sorted(e["cursor"] for e in got)
 
 
-def test_staff_token(client, monkeypatch):
-    monkeypatch.setenv("STAFF_DASHBOARD_TOKEN", "s3cret-test")
+def test_staff_feed_needs_a_login(client, session):
+    from starlette.websockets import WebSocketDisconnect
+    from tests.keys import login_as
+    from app.chat_api import demo_clinic_id
     assert client.get("/ops/recent").status_code == 401
-    assert client.get("/ops/recent?token=s3cret-test").status_code == 200
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ops/ws?after=0") as ws:
+            ws.receive_json()
+    login_as(client, session, demo_clinic_id(), "owner")
+    assert client.get("/ops/recent").status_code == 200
+    ticket = client.post("/auth/ws-ticket").json()["ticket"]
+    with client.websocket_connect(f"/ops/ws?ticket={ticket}"):
+        pass
+    with pytest.raises(WebSocketDisconnect):                      # a ticket works once
+        with client.websocket_connect(f"/ops/ws?ticket={ticket}") as ws:
+            ws.receive_json()
 
 
 def test_thread_events_replay(client):

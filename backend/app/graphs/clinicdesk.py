@@ -346,6 +346,8 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         """Give a node a fresh ToolContext and release its DB session afterwards."""
         def node(state: State) -> State:
             ctx = make_ctx()
+            if ctx.conversation_id is None:          # alerts and handoffs belong to this conversation (DEVLOG #49)
+                ctx.conversation_id = state.get("conversation_id")
             try:
                 return fn(state, ctx)
             finally:

@@ -1,15 +1,42 @@
 import { clsx } from "clsx";
-import { ChevronLeft, ChevronRight, Volume2, VolumeX } from "lucide-react";
+import { ChevronLeft, ChevronRight, LogOut, Volume2, VolumeX } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Alert, type Appt, type Graph, type Schedule as ScheduleData, type Stats, staffGet, staffPost } from "./api";
 import { Alerts, Numbers } from "./Panels";
 import { Schedule } from "./Schedule";
 import { chime, useStaffFeed } from "./useStaffFeed";
 import { XRay } from "./XRay";
+import { demoEnabled, demoLogin, logout, me, onLoggedOut, type StaffUser } from "./auth";
+import { Login } from "./Login";
+import { Onboarding } from "./Onboarding";
+
+const EMBEDDED = typeof window !== "undefined" && window.self !== window.top;   // inside the judge page
+const ROLE_LABEL: Record<StaffUser["role"], string> = { owner: "Owner", receptionist: "Receptionist", doctor: "Doctor" };
+
+/** Staff login gate. `/staff?demo=receptionist` (used by the judge page) opens a one-click demo session. */
+export default function StaffApp() {
+  const [user, setUser] = useState<StaffUser | null | undefined>(undefined);
+  useEffect(() => {
+    const role = new URLSearchParams(window.location.search).get("demo") as StaffUser["role"] | null;
+    (async () => {
+      const u = await me();
+      if (u && (!role || u.role === role)) return setUser(u);
+      if (role && ["owner", "receptionist", "doctor"].includes(role) && await demoEnabled()) {
+        try { return setUser(await demoLogin(role)); } catch { /* fall through to the login page */ }
+      }
+      setUser(null);
+    })();
+    return onLoggedOut(() => setUser(null));
+  }, []);
+  if (user === undefined) return <p className="p-8 text-ink-soft">Loading…</p>;
+  if (user === null) return <Login onIn={setUser} />;
+  return <Dashboard user={user} onLogout={async () => { await logout(); setUser(null); }} />;
+}
 
 const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
-export default function StaffApp() {
+function Dashboard({ user, onLogout }: { user: StaffUser; onLogout: () => void }) {
+  const can = (p: string) => user.permissions.includes(p);
   const [day, setDay] = useState(() => iso(new Date()));
   const [schedule, setSchedule] = useState<ScheduleData | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -31,7 +58,10 @@ export default function StaffApp() {
   const loadAlerts = useCallback(() => staffGet<{ alerts: Alert[] }>("/ops/alerts").then((r) => setAlerts(r.alerts)).catch(() => {}), []);
 
   useEffect(() => { loadSchedule(); }, [loadSchedule]);
-  useEffect(() => { loadStats(); loadAlerts(); staffGet<Graph>("/ops/graph").then(setGraph).catch(() => {}); }, [loadStats, loadAlerts]);
+  useEffect(() => {
+    loadAlerts();
+    if (user.permissions.includes("stats")) { loadStats(); staffGet<Graph>("/ops/graph").then(setGraph).catch(() => {}); }
+  }, [loadStats, loadAlerts, user]);
 
   const { runs, connected } = useStaffFeed({
     booking: (e) => {
@@ -47,7 +77,7 @@ export default function StaffApp() {
       }
     },
     alert: (e) => { loadAlerts(); if (e.type === "emergency" && soundRef.current) chime(); },
-    finished: () => loadStats(),
+    finished: () => { if (user.permissions.includes("stats")) loadStats(); },
   });
 
   const run = useMemo(() => runs.find((r) => r.id === selected) ?? runs[0] ?? null, [runs, selected]);
@@ -89,10 +119,19 @@ export default function StaffApp() {
             className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] hover:bg-page">
             {sound ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />} {sound ? "Alert sound on" : "Turn on alert sound"}
           </button>
+          <div className="flex items-center gap-2 border-l border-line pl-4">
+            <p className="text-right text-[13px] leading-tight">
+              <span className="block font-semibold">{user.name}</span>
+              <span className="text-ink-soft">{ROLE_LABEL[user.role]}{user.demo ? " · demo" : ""}</span>
+            </p>
+            <button type="button" onClick={onLogout} aria-label="Log out" title="Log out" className="grid h-8 w-8 place-items-center rounded-full text-ink-soft hover:bg-page hover:text-ink">
+              <LogOut className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1fr)_380px]">
+      <div className={clsx("grid gap-5 p-5", can("xray") && (EMBEDDED ? "grid-cols-[minmax(0,1fr)_330px] gap-4 p-4" : "xl:grid-cols-[minmax(0,1fr)_380px]"))}>
         <main className="min-w-0 space-y-4">
           <Alerts alerts={visibleAlerts} onDismiss={(id) => setHandled((h) => new Set(h).add(id))} />
           {notice && (
@@ -107,12 +146,18 @@ export default function StaffApp() {
           <div className="rounded-2xl border border-line bg-white p-3">
             {schedule ? <Schedule data={schedule} flash={flash} isToday={isToday} onAction={act} /> : <p className="p-6 text-ink-soft">Loading the schedule…</p>}
           </div>
-          <p className="text-[12px] text-ink-soft">Click a booking to check the patient in or update it. Patient names are shortened and phone numbers hidden on this screen.</p>
+          <p className="text-[12px] text-ink-soft">
+            {user.role === "doctor" ? "Your patients only. Click a booking to start or finish the visit." : "Click a booking to check the patient in or update it."}
+            {user.demo ? " Demo session: patient names are shortened." : ""} Phone numbers are never shown here.
+          </p>
+          {can("onboarding") && <Onboarding />}
         </main>
-        <aside className="space-y-6 rounded-2xl border border-line bg-white p-4 xl:self-start">
-          <XRay graph={graph} run={run} runs={runs} onSelect={setSelected} />
-          <Numbers s={stats} />
-        </aside>
+        {can("xray") && (
+          <aside className="space-y-6 rounded-2xl border border-line bg-white p-4 xl:self-start">
+            <XRay graph={graph} run={run} runs={runs} onSelect={setSelected} />
+            <Numbers s={stats} />
+          </aside>
+        )}
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 """Endpoints the patient app needs (Day 12): clinic info, history after reload, card details, UI hints,
 language picker hint, typed card answers over HTTP."""
 import pytest
-from fastapi.testclient import TestClient
+from tests.keys import KeyedClient as TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app import chat_api

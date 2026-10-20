@@ -78,9 +78,15 @@ export function useStaffFeed(on: { booking?: (e: OpsEvent) => void; alert?: (e: 
       });
     };
 
-    const connect = () => {
+    const connect = async () => {
       if (stop) return;
-      ws = new WebSocket(wsUrl(cursor.current));
+      let url: string;
+      try { url = await wsUrl(cursor.current); } catch {
+        timer = setTimeout(connect, Math.min(15000, 1000 * 2 ** retry++));
+        return;
+      }
+      if (stop) return;
+      ws = new WebSocket(url);
       ws.onopen = () => { setConnected(true); retry = 0; };
       ws.onmessage = (m) => {
         try {
@@ -90,10 +96,10 @@ export function useStaffFeed(on: { booking?: (e: OpsEvent) => void; alert?: (e: 
       };
       ws.onclose = () => {
         setConnected(false);
-        timer = setTimeout(connect, Math.min(15000, 1000 * 2 ** retry++));
+        if (!stop) timer = setTimeout(connect, Math.min(15000, 1000 * 2 ** retry++));
       };
     };
-    connect();
+    void connect();
     return () => { stop = true; clearTimeout(timer); ws?.close(); };
   }, []);
 

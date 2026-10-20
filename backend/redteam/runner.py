@@ -228,20 +228,22 @@ def run_live(case: dict, base_url: str, timeout: float = 60.0, token: str | None
     if case.get("live") is False:
         return Result(case["id"], case["category"], True, skipped=True)
     fails: list[str] = []
-    tid = None
+    tid, key = None, None
     headers = {"x-redteam-token": token} if token else {}
     with httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout, headers=headers) as c:
         for i, turn in enumerate(case["turns"]):
+            kh = {"X-Thread-Key": key} if key else {}           # conversations need their secret key (DEVLOG #48)
             if "answer" in turn:
-                r = c.post("/chat/answer", json={"thread_id": tid, "text": turn["answer"]})
+                r = c.post("/chat/answer", json={"thread_id": tid, "text": turn["answer"]}, headers=kh)
             else:
-                r = c.post("/chat/turn", json={"text": turn["say"], "thread_id": tid})
+                r = c.post("/chat/turn", json={"text": turn["say"], "thread_id": tid}, headers=kh)
             out = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
             out["http_status"] = r.status_code
             if r.status_code != 200 and "http_status" not in (turn.get("expect") or {}):
                 fails.append(f"turn {i + 1}: HTTP {r.status_code} {out.get('detail', '')}")
                 break
             tid = out.get("thread_id", tid)
+            key = out.get("thread_key", key)
             fails += [f"turn {i + 1}: {f}" for f in check(turn.get("expect") or {}, out, live=True)]
     return Result(case["id"], case["category"], not fails, fails)
 

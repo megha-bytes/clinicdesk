@@ -34,6 +34,14 @@ services:
         sync: false
       - key: REDTEAM_TOKEN          # lets the nightly red-team run skip the per-IP rate limit
         sync: false
+      - key: DEMO_LOGIN_ENABLED     # one-click demo staff sessions (the rules want a demo without credentials)
+        value: "true"
+      - key: TAVILY_API_KEY         # clinic onboarding (owner side only)
+        sync: false
+      - key: OWNER_EMAIL            # optional: creates the real owner account on startup
+        sync: false
+      - key: OWNER_PASSWORD         # optional: 10+ characters; never in chat or the repo
+        sync: false
 
   # Patient app (React, built to static files). Free static sites don't sleep.
   - type: web
@@ -48,6 +56,21 @@ services:
         value: https://clinicdesk-api.onrender.com
       - key: NODE_VERSION
         value: "24"
+      - key: VITE_YOUTUBE_ID        # the video on the landing page (the part after watch?v=)
+        sync: false
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: X-Frame-Options
+        value: SAMEORIGIN
+      - path: /*
+        name: Permissions-Policy
+        value: microphone=(self), camera=(), geolocation=()
     routes:
       - type: rewrite
         source: /*

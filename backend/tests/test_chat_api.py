@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.keys import KeyedClient as TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import select
 

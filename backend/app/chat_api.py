@@ -9,6 +9,11 @@ GET  /chat/{thread_id}/events?after=N               → reconnect: replay + live
 
 Every run also feeds the staff dashboard's live channel (see app/realtime/routes.py).
 
+Conversations belong to the browser that started them (DEVLOG #48): the first message returns a secret
+`thread_key` (JSON field, or the `X-Thread-Key` response header on streams). Every later call for that
+thread must send it back in the `X-Thread-Key` header; without it the thread "doesn't exist" (404).
+Only its SHA-256 is stored.
+
 Protected against runaway spend: a per-IP rate limit and a daily model-spend cap (from the cost ledger).
 Uses the demo clinic. Try it from /docs.
 """
@@ -24,7 +29,7 @@ import contextvars
 import json
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -155,33 +160,44 @@ def demo_clinic_id() -> str:
         return _demo_clinic_id(s)
 
 
-def _conversation(thread_id: str | None, channel: str | None = None) -> tuple[str, str]:
-    """The conversation row (created on the first message). A conversation that switches to the call
-    screen is marked "voice"."""
+def _conversation(thread_id: str | None, channel: str | None = None, key: str | None = None) -> tuple[str, str, str | None]:
+    """(thread_id, conversation_id, new_thread_key). Creates the conversation on the first message and returns
+    its secret key; for an existing thread the caller must present that key. A conversation that switches to
+    the call screen is marked "voice"."""
+    import hashlib
+    import hmac
+    import secrets
     with SessionLocal() as s:
         if thread_id:
             conv = s.scalar(select(m.Conversation).where(m.Conversation.thread_id == thread_id))
-            if conv is None:
+            ok = (conv is not None and conv.thread_key_hash and key
+                  and hmac.compare_digest(conv.thread_key_hash, hashlib.sha256(key.encode()).hexdigest()))
+            if not ok:
                 raise HTTPException(404, "Unknown conversation.")
             if channel == "voice" and conv.channel == "web":
                 conv.channel = "voice"
                 s.commit()
-            return conv.thread_id, conv.id
-        conv = m.Conversation(clinic_id=_demo_clinic_id(s), channel=channel or "web")
+            return conv.thread_id, conv.id, None
+        new_key = secrets.token_urlsafe(24)
+        conv = m.Conversation(clinic_id=_demo_clinic_id(s), channel=channel or "web",
+                              thread_key_hash=hashlib.sha256(new_key.encode()).hexdigest())
         s.add(conv)
         s.commit()
-        return conv.thread_id, conv.id
+        return conv.thread_id, conv.id, new_key
 
 
-def _public(thread_id: str, out: dict) -> dict:
-    return {"thread_id": thread_id, "reply": out["reply"], "speech": out.get("speech"), "interrupt": out["interrupt"], "ui": out.get("ui") or {},
+ThreadKey = Header(None, alias="X-Thread-Key", description="The secret returned with the conversation's first reply.")
+
+
+def _public(thread_id: str, out: dict, key: str | None = None) -> dict:
+    return {"thread_id": thread_id, **({"thread_key": key} if key else {}), "reply": out["reply"], "speech": out.get("speech"), "interrupt": out["interrupt"], "ui": out.get("ui") or {},
             "intent": out["intent"], "language": out["language"], "tools": out["tools"]}
 
 
 @router.post("/turn", dependencies=[Depends(_guard)])
-def chat_turn(body: TurnIn) -> dict:
+def chat_turn(body: TurnIn, x_thread_key: str | None = ThreadKey) -> dict:
     graph = _Runtime.get()
-    thread_id, conv_id = _conversation(body.thread_id, body.channel)
+    thread_id, conv_id, key = _conversation(body.thread_id, body.channel, x_thread_key)
     if pending_interrupt(graph, thread_id):
         raise HTTPException(409, "Please answer the pending question first (POST /chat/answer).")
     token = CHANNEL.set(body.channel)
@@ -190,13 +206,13 @@ def chat_turn(body: TurnIn) -> dict:
                          language=body.language, voice=body.channel == "voice")
     finally:
         CHANNEL.reset(token)
-    return _public(thread_id, out)
+    return _public(thread_id, out, key)
 
 
 @router.post("/answer", dependencies=[Depends(_guard)])
-def chat_answer(body: AnswerIn) -> dict:
+def chat_answer(body: AnswerIn, x_thread_key: str | None = ThreadKey) -> dict:
     graph = _Runtime.get()
-    _conversation(body.thread_id, body.channel)
+    _conversation(body.thread_id, body.channel, x_thread_key)
     if not pending_interrupt(graph, body.thread_id):
         raise HTTPException(409, "There's no question waiting for an answer.")
     token = CHANNEL.set(body.channel)
@@ -211,7 +227,7 @@ def chat_answer(body: AnswerIn) -> dict:
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
 
 
-def _stream_run(channel: str = "web", **kwargs) -> StreamingResponse:
+def _stream_run(channel: str = "web", key: str | None = None, **kwargs) -> StreamingResponse:
     """Run the graph in a worker thread and stream its events as AG-UI server-sent events."""
     async def gen():
         loop = asyncio.get_running_loop()
@@ -237,32 +253,33 @@ def _stream_run(channel: str = "web", **kwargs) -> StreamingResponse:
                 break
             yield agui_encode(ev)
         await task
-    return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
+    headers = {**SSE_HEADERS, **({"X-Thread-Key": key, "X-Thread-Id": kwargs["thread_id"]} if key else {})}
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 @router.post("/stream", dependencies=[Depends(_guard)])
-def chat_stream(body: TurnIn) -> StreamingResponse:
+def chat_stream(body: TurnIn, x_thread_key: str | None = ThreadKey) -> StreamingResponse:
     graph = _Runtime.get()
-    thread_id, conv_id = _conversation(body.thread_id, body.channel)
+    thread_id, conv_id, key = _conversation(body.thread_id, body.channel, x_thread_key)
     if pending_interrupt(graph, thread_id):
         raise HTTPException(409, "Please answer the pending question first (POST /chat/answer/stream).")
-    return _stream_run(channel=body.channel, graph=graph, thread_id=thread_id, text=body.text, conversation_id=conv_id,
+    return _stream_run(channel=body.channel, key=key, graph=graph, thread_id=thread_id, text=body.text, conversation_id=conv_id,
                        clinic_id=demo_clinic_id(), language=body.language)
 
 
 @router.post("/answer/stream", dependencies=[Depends(_guard)])
-def chat_answer_stream(body: AnswerIn) -> StreamingResponse:
+def chat_answer_stream(body: AnswerIn, x_thread_key: str | None = ThreadKey) -> StreamingResponse:
     graph = _Runtime.get()
-    _conversation(body.thread_id, body.channel)
+    _conversation(body.thread_id, body.channel, x_thread_key)
     if not pending_interrupt(graph, body.thread_id):
         raise HTTPException(409, "There's no question waiting for an answer.")
     return _stream_run(channel=body.channel, graph=graph, thread_id=body.thread_id, approved=body.answer(), clinic_id=demo_clinic_id())
 
 
 @router.get("/{thread_id}/pending")
-def chat_pending(thread_id: str) -> dict:
+def chat_pending(thread_id: str, x_thread_key: str | None = ThreadKey) -> dict:
     graph = _Runtime.get()
-    _conversation(thread_id)
+    _conversation(thread_id, key=x_thread_key)
     return {"thread_id": thread_id, "interrupt": pending_interrupt(graph, thread_id)}
 
 
@@ -280,10 +297,10 @@ def clinic_info() -> dict:
 
 
 @router.get("/{thread_id}/history")
-def chat_history(thread_id: str) -> dict:
+def chat_history(thread_id: str, x_thread_key: str | None = ThreadKey) -> dict:
     """The visible conversation so far (for the app after a reload) and any card waiting for an answer."""
     graph = _Runtime.get()
-    _conversation(thread_id)
+    _conversation(thread_id, key=x_thread_key)
     values = graph.get_state({"configurable": {"thread_id": thread_id}}).values or {}
     msgs = [{"role": x["role"], "content": x["content"]} for x in values.get("messages", [])
             if x.get("role") in ("user", "assistant") and x.get("content")]
@@ -292,9 +309,10 @@ def chat_history(thread_id: str) -> dict:
 
 
 @router.get("/{thread_id}/events")
-async def chat_events(thread_id: str, request: Request, after: int = 0) -> StreamingResponse:
+async def chat_events(thread_id: str, request: Request, after: int = 0,
+                      x_thread_key: str | None = ThreadKey) -> StreamingResponse:
     """Replay events after `after` (or the Last-Event-ID header), then stream new ones live."""
-    _conversation(thread_id)
+    await asyncio.to_thread(_conversation, thread_id, None, x_thread_key)
     last = request.headers.get("last-event-id")
     after = int(last) if last and last.isdigit() else after
     return StreamingResponse(_subscribe(thread_channel(thread_id), after, request), media_type="text/event-stream",

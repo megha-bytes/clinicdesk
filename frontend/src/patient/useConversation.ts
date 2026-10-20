@@ -71,12 +71,21 @@ export function reducer(state: State, a: Action): State {
   }
 }
 
-function readStored(): string | null {
-  try { return localStorage.getItem(STORAGE_KEY); } catch { return null; }
+/** The conversation this browser owns: its id and the secret key the clinic gave it (DEVLOG #48). */
+interface Stored { id: string; key: string }
+let current: Stored | null = null;
+function readStored(): Stored | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const v = raw ? JSON.parse(raw) : null;
+    return v && typeof v.id === "string" && typeof v.key === "string" ? v : null;
+  } catch { return null; }
 }
-function store(id: string | null) {
-  try { id ? localStorage.setItem(STORAGE_KEY, id) : localStorage.removeItem(STORAGE_KEY); } catch { /* private mode */ }
+function store(v: Stored | null) {
+  current = v;
+  try { v ? localStorage.setItem(STORAGE_KEY, JSON.stringify(v)) : localStorage.removeItem(STORAGE_KEY); } catch { /* private mode */ }
 }
+const keyHeader = (): Record<string, string> => (current ? { "X-Thread-Key": current.key } : {});
 
 export function useConversation(defaultLang: Lang = "en") {
   const [state, dispatch] = useReducer(reducer, initialState(defaultLang));
@@ -85,12 +94,13 @@ export function useConversation(defaultLang: Lang = "en") {
 
   // Pick the conversation back up after a reload.
   useEffect(() => {
-    const id = readStored();
-    if (!id) return;
+    const saved = readStored();
+    if (!saved || new URLSearchParams(window.location.search).get("say")) return;   // a scenario starts fresh
+    current = saved;
     getJson<{ messages: { role: "user" | "assistant"; content: string }[]; interrupt: Card | null; language: Lang }>(
-      `/chat/${id}/history`,
+      `/chat/${saved.id}/history`, keyHeader(),
     ).then((h) => dispatch({
-      type: "restore", threadId: id, card: h.interrupt, language: h.language || defaultLang,
+      type: "restore", threadId: saved.id, card: h.interrupt, language: h.language || defaultLang,
       messages: h.messages.map((m) => ({ id: nextId(), role: m.role, text: m.content })),
     })).catch(() => store(null));
   }, [defaultLang]);
@@ -101,7 +111,6 @@ export function useConversation(defaultLang: Lang = "en") {
       await postStream(`${API_URL}${path}`, body, (ev) => {
         const t = ev.type as string;
         if (t === "RUN_STARTED" && typeof ev.threadId === "string") {
-          store(ev.threadId);
           dispatch({ type: "started", threadId: ev.threadId });
         } else if (t === "CUSTOM" && ev.name === "status") {
           dispatch({ type: "status", text: String((ev.value as { text?: string })?.text ?? "") });
@@ -110,6 +119,9 @@ export function useConversation(defaultLang: Lang = "en") {
         } else if (t === "RUN_ERROR") {
           throw new StreamError(500, String(ev.message ?? ""));
         }
+      }, undefined, keyHeader(), (res) => {
+        const key = res.headers.get("X-Thread-Key"), id = res.headers.get("X-Thread-Id");
+        if (key && id) store({ id, key });               // a new conversation: keep its secret
       });
       if (last) dispatch({ type: "finished", result: last });
       else dispatch({ type: "error", error: "network" });

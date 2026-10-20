@@ -13,10 +13,13 @@ import "@fontsource/noto-sans-kannada/kannada-600.css";
 import "./index.css";
 import PatientApp from "./patient/PatientApp";
 import StaffApp from "./staff/StaffApp";
+import Landing from "./landing/Landing";
 
+// /  judge landing page · /app  patient app (chat + call) · /staff  staff dashboard (login)
 const path = window.location.pathname;
-const App = path.startsWith("/staff") ? StaffApp : PatientApp;
-if (path.startsWith("/staff")) document.title = "ClinicDesk · Staff dashboard";
+const App = path.startsWith("/staff") ? StaffApp : path.startsWith("/app") ? PatientApp : Landing;
+document.title = path.startsWith("/staff") ? "ClinicDesk · Staff dashboard"
+  : path.startsWith("/app") ? "ClinicDesk · Sunrise Family Clinic" : "ClinicDesk · the clinic front desk you can trust";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

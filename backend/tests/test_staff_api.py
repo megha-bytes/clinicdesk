@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.keys import KeyedClient as TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import select
 
@@ -16,6 +16,7 @@ from app.realtime.hub import hub, ops_channel
 from app.seed import seed
 from app.staff_api import short_name
 from tests.fakes import FakeClient
+from tests.keys import login_as
 from tests.test_booking_flow import Fake
 
 
@@ -29,6 +30,7 @@ def client(session, monkeypatch):
     chat_api._hits.clear()
     with TestClient(app) as c:
         c.clinic_id = info["clinic_id"]
+        login_as(c, session, info["clinic_id"], "owner", demo=True)      # the public demo's one-click owner
         yield c
     hub.reset()
 
@@ -96,10 +98,10 @@ def test_staff_check_in_flow_and_live_event(client, session):
     assert audit == ["check-in", "start", "complete"]
 
 
-def test_staff_token_required_when_set(client, monkeypatch):
-    monkeypatch.setenv("STAFF_DASHBOARD_TOKEN", "t0ken")
-    assert client.get("/ops/schedule").status_code == 401
-    assert client.get("/ops/schedule?token=t0ken").status_code == 200
+def test_staff_routes_need_a_login(client):
+    for path in ("/ops/schedule", "/ops/stats", "/ops/alerts", "/ops/graph", "/ops/recent"):
+        assert client.get(path, headers={"Authorization": ""}).status_code == 401
+        assert client.get(path, headers={"Authorization": "Bearer forged"}).status_code == 401
 
 
 def test_booking_event_carries_the_date(client):

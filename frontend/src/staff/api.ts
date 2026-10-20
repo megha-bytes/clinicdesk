@@ -1,30 +1,20 @@
-import { API_URL } from "../realtime/api";
-
-/** Staff token from the page URL (?token=…), passed to every staff call when the clinic sets one. */
-export const STAFF_TOKEN = new URLSearchParams(window.location.search).get("token");
-
-export function staffUrl(path: string, params: Record<string, string> = {}): string {
-  const q = new URLSearchParams(params);
-  if (STAFF_TOKEN) q.set("token", STAFF_TOKEN);
-  const qs = q.toString();
-  return `${API_URL}${path}${qs ? `?${qs}` : ""}`;
-}
+import { authFetch, wsTicketUrl } from "./auth";
 
 export async function staffGet<T>(path: string, params: Record<string, string> = {}): Promise<T> {
-  const r = await fetch(staffUrl(path, params));
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json() as Promise<T>;
-}
-
-export async function staffPost<T>(path: string): Promise<T> {
-  const r = await fetch(staffUrl(path), { method: "POST" });
+  const qs = new URLSearchParams(params).toString();
+  const r = await authFetch(`${path}${qs ? `?${qs}` : ""}`);
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `HTTP ${r.status}`);
   return r.json() as Promise<T>;
 }
 
-export function wsUrl(after: number): string {
-  return staffUrl("/ops/ws", { after: String(after) }).replace(/^http/, "ws");
+export async function staffPost<T>(path: string, body?: unknown): Promise<T> {
+  const r = await authFetch(path, { method: "POST", headers: body ? { "content-type": "application/json" } : {},
+                                    body: body ? JSON.stringify(body) : undefined });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `HTTP ${r.status}`);
+  return r.json() as Promise<T>;
 }
+
+export const wsUrl = (after: number): Promise<string> => wsTicketUrl(after);
 
 export interface Doctor { id: string; name: string; specialty: string; booking_style: string; hours: string[][]; on_leave: boolean; now_serving: number | null; waiting: number }
 export interface Appt { id: string; doctor_id: string; start: string; end: string; status: string; source: string; token_no: number | null; urgent: boolean; patient: string; type: string | null; booked_by_agent: boolean; in_consult: boolean }

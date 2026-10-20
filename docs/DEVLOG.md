@@ -54,6 +54,8 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 45 | `llm_call.tier` is `VARCHAR(8)` but "lightning" has 9 letters: on Postgres (Neon) every Lightning cost row failed to save (logged, not raised), so cost panels and the daily spend cap under-counted | Oct 20 | ✅ Fixed | Column widened to 16 (migration `9c1e7a4b2d10`, runs on deploy); found by the staff-stats test on Postgres |
 | 46 | Kannada text-to-speech depends on the device: Chrome desktop has no Kannada voice (Edge and Android with the Google Kannada pack do) | Oct 20 | 🟡 Watch | Call screen shows replies on screen when there's no voice; option: server-side Indian-language TTS later (cut list #1) |
 | 47 | Laptop, 9:35 pm: 2 staff tests failed (`StopIteration`): they looked for a confirmed visit *today*, but the seed marks today's earlier visits completed, so late in the evening none are left | Oct 20 | ✅ Fixed | Test-only: those tests use the next weekday. The app was fine; tests passed at 6 pm |
+| 48 | Anyone with a chat's `thread_id` could read its history (names, phone numbers) or answer its cards; the staff dashboard was protected only by one optional shared token in the URL | Oct 20 | ✅ Fixed | Day 21: staff accounts, sessions, roles, clinic scoping; per-conversation secret `X-Thread-Key`; WebSocket tickets; one-click demo roles |
+| 49 | Emergency and handoff alerts were saved without their conversation (tools got no `conversation_id`), so they couldn't be tied to a clinic or conversation | Oct 20 | ✅ Fixed | The graph passes the conversation to every tool step; found while scoping alerts to the staff member's clinic |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -726,6 +728,40 @@ Layout fix during review: with a card on screen the call controls were pushed of
 Postgres run also caught #45 (Lightning cost rows not saved).
 Tests: backend **464 passed** on SQLite and Postgres (41 voice: numbers, yes/no, spoken replies, a full voice
 booking over SSE tagged voice, chat stays web, spoken card number still refused); frontend **13 passed**; red-team 60/60.
+
+### 2026-10-20 · Day 21 + judge page + Tavily onboarding (submission night)
+
+Decided to submit tonight (Devpost allows edits until the deadline), so the remaining plan was built in one go.
+
+**Authentication and authorization** (`app/auth/`): `staff_user` and `staff_session` tables (migration
+`b7d2e4f6a813`); scrypt password hashes; random bearer tokens stored only as SHA-256 (revocable, 12 h absolute,
+2 h idle); lockout after 5 failures; the same error for unknown email and wrong password; per-IP rate limit;
+audited logins. Roles scoped to the user's clinic: owner (everything), receptionist (schedule, check-in, alerts),
+doctor (own column, own visits). Every `/ops/*` route uses `require(permission)` and filters by the user's clinic;
+another clinic's booking is a 404. The live feed takes a one-time ticket instead of a token in the URL and filters
+events per role. Header tokens instead of cookies: the app and API are different sites (`onrender.com` is a public
+suffix), where third-party cookies are blocked, and no cookies means no CSRF. Security headers on every API
+response. CLI: `py -m app.auth create|disable`; optional `OWNER_EMAIL`/`OWNER_PASSWORD` bootstrap.
+The hackathon wants a demo without credentials, so `DEMO_LOGIN_ENABLED` gives one-click Owner / Receptionist /
+Doctor sessions for the demo clinic (shortened names, no staff management).
+
+**Patients own their conversations (#48):** the first reply returns a secret thread key (JSON or `X-Thread-Key`
+header); later calls must send it; only its hash is stored. The app keeps it with the thread id; the live
+red-team runner sends it too.
+
+**Judge page** (`/`): pitch, video, scenario buttons (Hindi booking, skin doctor, voice call, Kannada emergency,
+injection attempt, medicine question) driving a patient phone and a staff dashboard side by side, with a role
+switch. Patient app moved to `/app`. Checked in headless Chromium against a local backend with a scripted model:
+the Hindi booking offered Dr. Rao's times, the Kannada emergency turned the phone red and raised the alert on the
+dashboard within the turn, the injection was blocked by NeMo Guardrails and shown in the X-ray.
+
+**Tavily onboarding** (`app/onboarding/`, owner only): Tavily Extract (or Search) → Nemotron Super draft →
+deterministic review marking each value *found* in the page text or *check*; drafts stored and approved/rejected
+by the owner. Never used in the patient chat.
+
+Tests: backend **487 passed** on SQLite and Postgres (18 auth: hashing, login, lockout, rate limit, expiry,
+disabled users, role matrix, doctor scoping, cross-clinic 404, full vs short names, demo sessions, feed filtering,
+thread keys, security headers; 5 onboarding); frontend 13; red-team 60/60 scripted.
 
 ---
 
