@@ -252,10 +252,11 @@ class Ctx:
 def test_clean_date():
     assert clean_date("2024-10-20", Ctx) == "2026-10-20"
     assert clean_date("2026-01-05", Ctx) == "2027-01-05"
-    assert clean_date("tomorrow", Ctx) == "tomorrow" and clean_date("next week", Ctx) is None
+    assert clean_date("tomorrow", Ctx) == "2026-10-13" and clean_date("next week", Ctx) is None
     assert clean_date("today", Ctx, "book with Rao") is None                 # not said → not used
-    assert clean_date("today", Ctx, "aaj shaam") == "today" and clean_date("tomorrow", Ctx, "कल सुबह") == "tomorrow"
+    assert clean_date("today", Ctx, "aaj shaam") == "2026-10-12" and clean_date("tomorrow", Ctx, "कल सुबह") == "2026-10-13"
     assert clean_date("2026-10-20", Ctx, "20th October") == "2026-10-20"
+    assert clean_date("2026-10-21", Ctx, "My mobile is 8376897656, name is asha") is None   # digits aren't a date
 
 
 def test_merge_details_only_keeps_what_was_typed():
@@ -299,3 +300,65 @@ def test_invented_option_number_is_ignored():
     assert pick_option(offered, {"option": 2}, "dusra wala") is offered[1]
     assert pick_option(offered, {"option": 1}, "option 1, I'm Asha") is offered[0]
     assert pick_option(offered, {}, "Age : 23,  I want to come in at 11:45") is offered[1]
+
+
+# ------------------------------------------------------------------ fourth live run (DEVLOG #37)
+def test_first_visit_is_not_option_one_and_lead_number_picks():
+    offered = [{"label": "a", "short": "Wed 21 Oct, 11:15 AM"}, {"label": "b", "short": "Wed 21 Oct, 12:25 PM"},
+               {"label": "c", "short": "Wed 21 Oct, 9:10 AM"}]
+    assert pick_option(offered, {"option": 1}, "3, not my first visit") is offered[2]
+    assert pick_option(offered, {"option": 1}, "not my first visit") is None
+    assert pick_option(offered, {"option": 3}, "3. My mobile is 8376897656, name is asha") is offered[2]
+    assert pick_option(offered, {}, "the first one") is offered[0]
+    assert pick_option(offered, {}, "3 years old") is None
+
+
+def test_age_needs_an_age_word_or_our_question():
+    d, _ = merge_details({}, {"age": 3}, "3, not my first visit", used=frozenset({"3"}))
+    assert "age" not in d
+    d, _ = merge_details({}, {"age": 30, "phone": "9123456789"}, "Neha Rao, 30, 9123456789")
+    assert d["age"] == 30
+    d, _ = merge_details({}, {"age": 3}, "3, not my first visit", asked_age=True, used=frozenset({"3"}))
+    assert "age" not in d                                                    # 3 picked the option
+    d, _ = merge_details({}, {}, "23", asked_age=True)
+    assert d["age"] == 23
+    d, _ = merge_details({}, {"age": 41}, "I'm Ravi, 41 years, 9123456780")
+    assert d["age"] == 41
+
+
+def test_live_run_replay_asha(session, clinic):
+    first = "Hi, is ananya available for an appointment tomorrow at 12pm?"
+    second = "3. My mobile is 8376897656, name is asha"
+    third = "3, not my first visit"
+    fake = Fake({first: {"intent": "book", "doctor": "Ananya", "date": "tomorrow", "time": "12:00"},
+                 second: {"intent": "book", "option": 3, "phone": "8376897656", "name": "asha", "date": "2026-10-13"},
+                 third: {"intent": "book", "option": 1, "age": 3, "new_patient": False}})   # what the model sent
+    g, _ = graph_for(session, clinic, fake)
+    out = send(g, "t", first)
+    option3 = out["reply"].split("3. ", 1)[1].split("\n")[0]
+    out = send(g, "t", second)
+    assert out["reply"].startswith(f"Got it: {option3}.") and fake.steps == []
+    out = send(g, "t", third)
+    assert out["interrupt"] is None and out["reply"].startswith("I couldn't find Asha with that number.")
+    out = send(g, "t", "I'm 34 years old")
+    fake.extract["I'm 34 years old"] = {"intent": "book", "age": 34}
+    assert out["interrupt"]["kind"] == "consent"
+    q = answer(g, "t", "yes")["interrupt"]
+    assert q["kind"] == "confirm" and option3 in q["summary"]
+
+
+def test_typed_answer_to_a_card_changes_the_choice(session, clinic):
+    from app.realtime import runner
+    fake = Fake({NEHA: NEHA_EXT, "1": {"intent": "book", "option": 1}})
+    g, _ = graph_for(session, clinic, fake)
+    send(g, "t", NEHA)
+    out = answer(g, "t", "yes")
+    third = out["reply"].split("3. ", 1)[1].split("\n")[0]                 # e.g. "Tue 13 Oct, 11:45 AM"
+    first_hold = send(g, "t", "1")["interrupt"]
+    typed = f"No I asked for 3, {third.split(', ')[1]}"
+    fake.extract[typed] = {"intent": "book", "option": 3}
+    out = runner.run(g, "t", approved=typed)
+    assert out["interrupt"]["kind"] == "confirm" and third in out["interrupt"]["summary"]
+    assert first_hold["summary"] != out["interrupt"]["summary"]
+    held = session.scalars(select(m.Appointment.status).where(m.Appointment.status == "held")).all()
+    assert len(held) == 1                                                    # the declined hold was released

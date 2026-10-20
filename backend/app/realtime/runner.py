@@ -14,7 +14,7 @@ from typing import Any
 
 from langgraph.types import Command
 
-from app.graphs.clinicdesk import _config, _outcome, is_yes
+from app.graphs.clinicdesk import _config, _outcome, is_no, is_yes
 from app.realtime.events import EventFactory, EventType
 from app.realtime.hub import hub, ops_channel, thread_channel
 
@@ -58,7 +58,15 @@ def status_text(key: str, lang: str, **kw: Any) -> str | None:
 def run(graph, thread_id: str, *, text: str | None = None, approved: bool | str | None = None,
         conversation_id: str | None = None, clinic_id: str | None = None,
         on_event: Callable[[dict], None] | None = None) -> dict:
-    """Run the graph for a new message (`text`) or an answer to a pending card (`approved`)."""
+    """Run the graph for a new message (`text`) or an answer to a pending card (`approved`).
+
+    An answer that is neither yes nor no ("No, I asked for 3, 9:10 AM") declines the card and is then
+    handled as a new message, so the patient's words aren't lost (DEVLOG #37)."""
+    if (text is None and isinstance(approved, str) and approved.strip()
+            and not is_yes(approved) and not is_no(approved)):
+        run(graph, thread_id, approved=False, conversation_id=conversation_id, clinic_id=clinic_id, on_event=on_event)
+        return run(graph, thread_id, text=approved.strip()[:1000], conversation_id=conversation_id,
+                   clinic_id=clinic_id, on_event=on_event)
     config = _config(thread_id)
     if text is not None:
         inp: Any = {"messages": [{"role": "user", "content": text}]}

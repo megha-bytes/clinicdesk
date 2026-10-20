@@ -105,7 +105,15 @@ class TurnIn(BaseModel):
 
 class AnswerIn(BaseModel):
     thread_id: str
-    approved: bool
+    approved: bool | None = None
+    text: str | None = Field(None, max_length=1000, description="A typed answer instead of a yes/no tap.")
+
+    def answer(self) -> bool | str:
+        if self.text and self.text.strip():
+            return self.text
+        if self.approved is None:
+            raise HTTPException(422, "Send approved (true/false) or text.")
+        return self.approved
 
 
 def demo_clinic_id() -> str:
@@ -147,7 +155,7 @@ def chat_answer(body: AnswerIn) -> dict:
     _conversation(body.thread_id)
     if not pending_interrupt(graph, body.thread_id):
         raise HTTPException(409, "There's no question waiting for an answer.")
-    out = runner.run(graph, body.thread_id, approved=body.approved, clinic_id=demo_clinic_id())
+    out = runner.run(graph, body.thread_id, approved=body.answer(), clinic_id=demo_clinic_id())
     return _public(body.thread_id, out)
 
 
@@ -198,7 +206,7 @@ def chat_answer_stream(body: AnswerIn) -> StreamingResponse:
     _conversation(body.thread_id)
     if not pending_interrupt(graph, body.thread_id):
         raise HTTPException(409, "There's no question waiting for an answer.")
-    return _stream_run(graph=graph, thread_id=body.thread_id, approved=body.approved, clinic_id=demo_clinic_id())
+    return _stream_run(graph=graph, thread_id=body.thread_id, approved=body.answer(), clinic_id=demo_clinic_id())
 
 
 @router.get("/{thread_id}/pending")

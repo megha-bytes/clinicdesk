@@ -43,6 +43,7 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 34 | Model invented `option: 1` from "I'm ehnas, my mobile is 7896578678" → "Got it: 9:50 AM" though no option was picked | Oct 19 | ✅ Fixed | Option numbers from the model are used only if the message itself says that number or an ordinal (first/pehla/ಮೊದಲ…) |
 | 35 | Reply language flipped mid-conversation: romanised Kannada read as Hindi; a bare phone number or "23" switched back to Hindi; consent shown in Hindi to a Kannada speaker | Oct 19 | ✅ Fixed | `language.py`: explicit request → script → romanised keywords → keep the conversation's language |
 | 36 | NeMo Guardrails 0.24.1 requires Python < 3.14; laptop runs 3.14 | Oct 19 | ⏸ Accepted | Installed only on < 3.14 (container 3.12, CI 3.12). Same actions run directly on 3.14; tests cover both engines. Optional: install Python 3.13 locally |
+| 37 | Fourth live run: "3, not my first visit" held option **1** ("first" read as an ordinal pick), "3." not picked, age 3 stored, phone digits read as a date (re-search), typed answer to the card lost | Oct 20 | ✅ Fixed | Ordinals only as picks ("the first one"), leading "3."/"3," picks, age needs an age word or our question and never the picked number, digits ≠ date, dates normalised to ISO, not-found message, typed card answer → decline + new message, declined hold released |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
@@ -561,6 +562,33 @@ ledger rows, ops channel PII-free, booking/emergency/guardrail events to staff, 
 booking, 409 on pending card, WebSocket replay, staff token, reconnect replay, slow-client hub).
 
 Also: the "NeMo Guardrails unavailable" line on Python 3.14 is now an info log, not a warning.
+
+### 2026-10-20 · Fourth live run (status lines visible) → option and age parsing fixes
+
+```
+you>  Hi, is ananya available for an appointment tomorrow at 12pm?
+      · Reading your message… · Checking Dr. Ananya Rao's calendar…
+desk> Free with Dr. Ananya Rao (₹500): 1. 11:15 AM  2. 12:25 PM  3. 9:10 AM …       [1.7 s]
+you>  3. My mobile is 8376897656, name is asha
+desk> (same list again) First visit? Your age, please.    ← "3." not picked; re-searched
+you>  3, not my first visit
+desk> [CONSENT] … yes   · Saving your details… · Holding 11:15 AM for you…          ← option 1!
+desk> [CONFIRM] Book Dr. Ananya Rao · Wed 21 Oct, 11:15 AM …
+      yes/no> No I asked for 3, 9:10 AM
+desk> OK, not booked. (list again)                          ← the typed answer was lost
+```
+Causes (reproduced with the exact extraction): the model returned `option: 1` for "3, not my first visit"
+and the #34 check accepted it because "first" matched the ordinal list; `(?![\d:.])` rejected "3." as a
+standalone number; the model's `age: 3` was accepted because "3" appears in the text; the phone number's
+digits satisfied the "message mentions a date" check, and "tomorrow" ≠ "2026-10-21" triggered a re-search.
+
+Fixes: ordinals count only as picks ("the first one", "dusra wala", or a ≤3-word reply), never in
+"first visit/first time"; a leading "3." / "3," picks option 3; an age needs an age word or to answer our
+age question, and never the number that picked an option; date detection ignores bare digits; dates
+stored as ISO so "tomorrow" and 21 Oct are the same; "not my first visit" + no record → "I couldn't find
+Asha with that number. Check it, or tell me your age to register."; a typed answer on a card that isn't
+yes/no declines the card and is processed as a new message (`/chat/answer` accepts `text`); a declined
+hold is released at once. Tests: **334 passed** (replay of this conversation with the model's real output).
 
 ---
 

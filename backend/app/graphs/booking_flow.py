@@ -26,11 +26,12 @@ from app.agent.tools import ToolContext, ToolFailure, normalise_phone, parse_day
 
 _PHONE_RUN = re.compile(r"(?<!\d)(?:\+?\d[\d\s-]{7,15}\d)(?!\d)")
 _AGE = re.compile(r"\b(?:age[d]?\s*(?:is\s*)?(\d{1,3})|(\d{1,3})\s*(?:years?|yrs?|y/?o|saal|साल|ವರ್ಷ)\b)", re.I)
+_LEAD = re.compile(r"^\s*(?:option\s*)?#?([1-9])\s*[.),:-](?!\d)")      # "3. my mobile is…", "3, not my…"
 _OPTION = re.compile(r"^\s*(?:option|no\.?|number|#)?\s*(\d)\s*[.)]?\s*(?:please|pls)?\s*$", re.I)
 _CLOCK = re.compile(r"\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?", re.I)
 _TODAY = re.compile(r"\b(today|tonight|aaj|ivattu|indu)\b|आज|ಇಂದು|ಇವತ್ತು", re.I)
 _TOMORROW = re.compile(r"\b(tomorrow|tmrw|kal|naale|nale)\b|कल|ನಾಳೆ", re.I)
-_DATEISH = re.compile(r"\d|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|mon|tue|wed|thu|fri|sat|sun|next|after|"
+_DATEISH = re.compile(r"\b\d{1,2}(st|nd|rd|th)\b|\b\d{1,2}[/-]\d{1,2}\b|\b\d{4}-\d{2}-\d{2}\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|mon|tue|wed|thu|fri|sat|sun|next|after|"
                       r"parso|week)", re.I)
 _WINDOW_WORDS = {
     "morning": re.compile(r"\b(morning|subah|subha|bellige)\b|सुबह|ಬೆಳಿಗ್ಗೆ|ಬೆಳಗ್ಗೆ", re.I),
@@ -62,6 +63,9 @@ T: dict[str, dict[str, str]] = {                 # short: replies may be read al
     "ask_name_phone": {"en": "Your name and mobile number?", "hi": "आपका नाम और मोबाइल नंबर?", "kn": "ನಿಮ್ಮ ಹೆಸರು ಮತ್ತು ಮೊಬೈಲ್ ಸಂಖ್ಯೆ?"},
     "ask_name": {"en": "Your name?", "hi": "आपका नाम?", "kn": "ನಿಮ್ಮ ಹೆಸರು?"},
     "ask_phone": {"en": "Your 10-digit mobile number?", "hi": "आपका 10 अंकों का मोबाइल नंबर?", "kn": "ನಿಮ್ಮ 10 ಅಂಕೆಯ ಮೊಬೈಲ್ ಸಂಖ್ಯೆ?"},
+    "not_found": {"en": "I couldn't find {name} with that number. Check it, or tell me your age to register.",
+                  "hi": "उस नंबर पर {name} नहीं मिले। नंबर जाँचें, या रजिस्टर करने के लिए अपनी उम्र बताइए।",
+                  "kn": "ಆ ಸಂಖ್ಯೆಯಲ್ಲಿ {name} ಸಿಗಲಿಲ್ಲ. ಸಂಖ್ಯೆ ಪರಿಶೀಲಿಸಿ, ಅಥವಾ ನೋಂದಣಿಗೆ ನಿಮ್ಮ ವಯಸ್ಸು ತಿಳಿಸಿ."},
     "ask_age": {"en": "First visit? Your age, please.", "hi": "पहली बार? अपनी उम्र बताइए।", "kn": "ಮೊದಲ ಭೇಟಿಯೇ? ನಿಮ್ಮ ವಯಸ್ಸು ತಿಳಿಸಿ."},
     "ask_doctor": {"en": "Which doctor, or what's it for?", "hi": "कौन से डॉक्टर, या किस लिए?", "kn": "ಯಾವ ವೈದ್ಯರು, ಅಥವಾ ಯಾವ ಕಾರಣಕ್ಕೆ?"},
     "booked": {"en": "✅ Booked: {doctor}, {when}, ₹{fee}.", "hi": "✅ बुक: {doctor}, {when}, ₹{fee}।",
@@ -109,7 +113,7 @@ def render(say: dict, lang: str) -> str:
         lines.append(t("ask_name", lang))
     elif "phone" in ask and not any(k.startswith("phone_") for k, _ in say.get("problems", [])):
         lines.append(t("ask_phone", lang))
-    if "age" in ask:
+    if "age" in ask and not any(k == "not_found" for k, _ in say.get("problems", [])):
         lines.append(t("ask_age", lang))
     if "doctor" in ask:
         lines.append(t("ask_doctor", lang))
@@ -121,8 +125,12 @@ def _digits(text: str | None) -> str:
 
 
 # --------------------------------------------------------------------------- extraction checks
-def merge_details(details: dict, ext: dict, text: str) -> tuple[dict, list[tuple[str, dict]]]:
-    """Add name/phone/age the patient actually typed in `text`. Returns (details, problems)."""
+def merge_details(details: dict, ext: dict, text: str, *, asked_age: bool = False,
+                  used: frozenset[str] = frozenset()) -> tuple[dict, list[tuple[str, dict]]]:
+    """Add name/phone/age the patient actually typed in `text`. Returns (details, problems).
+
+    An age counts only next to an age word ("23 years", "age 23") or as the answer right after we
+    asked for it, and never when the same number picked an option ("3, not my first visit", DEVLOG #37)."""
     details, problems = dict(details), []
     typed = _digits(text)
 
@@ -145,15 +153,20 @@ def merge_details(details: dict, ext: dict, text: str) -> tuple[dict, list[tuple
     if name and len(name) >= 2 and name.split()[0].casefold() in text.casefold():
         details["name"] = " ".join(w.capitalize() if w.islower() else w for w in name.split())
 
-    age = ext.get("age")
-    if age is None:
-        mm = _AGE.search(text)
-        age = (mm.group(1) or mm.group(2)) if mm else None
-    try:
-        age = int(age) if age is not None else None
-    except (TypeError, ValueError):
-        age = None
-    if age is not None and 0 <= age <= 120 and re.search(rf"\b{age}\b", text) and str(age) != details.get("phone"):
+    age = None
+    mm = _AGE.search(text)
+    if mm:
+        age = int(mm.group(1) or mm.group(2))
+    else:
+        cand = ext.get("age")
+        bare = re.fullmatch(r"\s*(\d{1,3})\s*\.?\s*", text) if asked_age else None
+        try:
+            cand = int(cand) if cand is not None else (int(bare.group(1)) if bare else None)
+        except (TypeError, ValueError):
+            cand = None
+        if cand is not None and str(cand) not in used and re.search(rf"(?<!\d){cand}(?!\d)", text):
+            age = cand
+    if age is not None and 0 <= age <= 120 and str(age) != details.get("phone"):
         details["age"] = age
     if ext.get("new_patient") is not None:
         details["new_patient"] = bool(ext["new_patient"])
@@ -185,7 +198,7 @@ def clean_date(value: Any, ctx: ToolContext, text: str | None = None) -> str | N
         if v not in ("today", "tomorrow") and not (_DATEISH.search(text) or _TOMORROW.search(text)):
             return None
     if v in ("today", "tomorrow"):
-        return v
+        return parse_day(v, ctx).isoformat()                   # "tomorrow" and "2026-10-21" are the same day
     try:
         d = date.fromisoformat(v)
     except ValueError:
@@ -208,11 +221,24 @@ _ORDINALS = {
 }
 
 
+_NOT_A_PICK = re.compile(r"first (visit|time)|pehli (baar|bar|dafa)|modala (bari|sala|sari)", re.I)
+
+
 def _says_number(text: str, n: int) -> bool:
-    """True if the message itself mentions option n (as a standalone number or an ordinal word)."""
-    if re.search(rf"(?<![\d:.]){n}(?![\d:.])", text):
+    """True if the message itself picks option n: a standalone number, or an ordinal used as a pick
+    ("the first one", "dusra wala"), never "first visit" (DEVLOG #37)."""
+    if re.search(rf"(?<![\d:.]){n}(?!\d|[:.]\d)", text):
         return True
-    return bool(_ORDINALS.get(n) and re.search(_ORDINALS[n], text, re.I))
+    return _says_ordinal(text, n)
+
+
+def _says_ordinal(text: str, n: int) -> bool:
+    ordp = _ORDINALS.get(n)
+    if not ordp or _NOT_A_PICK.search(text):
+        return False
+    if re.search(rf"(?:{ordp})\w*\s+(one|option|slot|wala|vala|wali|vali|ondu|time slot)\b", text, re.I):
+        return True
+    return len(re.findall(r"\w+", text)) <= 3 and re.search(ordp, text, re.I) is not None
 
 
 def pick_option(offered: list[dict], ext: dict, text: str) -> dict | None:
@@ -226,9 +252,11 @@ def pick_option(offered: list[dict], ext: dict, text: str) -> dict | None:
         n = None
     if n is not None and not _says_number(text, n):      # the model invented a pick (DEVLOG #34)
         n = None
-    mm = _OPTION.match(text)
+    mm = _OPTION.match(text) or _LEAD.match(text)
     if mm:
         n = int(mm.group(1))
+    if n is None:
+        n = next((k for k in range(1, len(offered) + 1) if _says_ordinal(text, k)), None)
     if n is not None and 1 <= n <= len(offered):
         return offered[n - 1]
     said = _times(text)
@@ -354,6 +382,7 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
             return {"booking": {}, "tool_results": results, "say": say, "hold_id": None}
         booking["chosen"] = None
         if last["result"].get("error") == "PATIENT_DECLINED":
+            _release_hold(ctx, (last.get("args") or {}).get("hold_id"))
             say["problems"].append(("declined_slot", {}))
             say["options"] = booking.get("offered")
         else:
@@ -365,13 +394,17 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
         say["problems"].append(("declined_consent", {}))
         return {"booking": {}, "tool_results": results, "say": say}
 
-    # ---- 1. details the patient typed
-    details, problems = merge_details(booking.get("details") or {}, ext, text)
+    # ---- 1. which option they picked (first, so "the 12:05 one" isn't read as a new time)
+    offered = booking.get("offered") or []
+    choice = pick_option(offered, ext, text)
+    used = frozenset({str(offered.index(choice) + 1)}) if choice else frozenset()
+
+    # ---- 2. details the patient typed
+    details, problems = merge_details(booking.get("details") or {}, ext, text,
+                                      asked_age="age" in (booking.get("last_ask") or []), used=used)
     booking["details"] = details
     say["problems"] += problems
 
-    # ---- 2. which option they picked (before anything else, so "the 12:05 one" isn't read as a new time)
-    choice = pick_option(booking.get("offered") or [], ext, text)
     if choice:
         booking["chosen"] = choice
     else:
@@ -411,6 +444,8 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
             elif fp.get("error") == "NOT_FOUND":
                 if details.get("age") is None:
                     missing.append("age")
+                    if details.get("new_patient") is False:          # "not my first visit", but no record
+                        say["problems"].append(("not_found", {"name": details["name"]}))
                 else:
                     args = {"name": details["name"], "age": details["age"], "phone": details["phone"],
                             "language": state.get("language", "en")}
@@ -451,7 +486,18 @@ def run_flow(state: dict, ctx: ToolContext) -> dict:
     elif booking.get("offered") and not say["options"] and not say["ask"] and not say["problems"]:
         say["options"] = booking["offered"]                     # remind only when there's nothing else to say
 
+    booking["last_ask"] = list(say["ask"])
     return {**upd, "booking": booking, "tool_results": results, "say": say}
+
+
+def _release_hold(ctx: ToolContext, hold_id: str | None) -> None:
+    """The patient said no to the card: free the slot now instead of waiting for the hold to expire."""
+    if not hold_id:
+        return
+    row = ctx.session.get(m.Appointment, hold_id)
+    if row is not None and row.status == "held":
+        row.status, row.hold_expires_at = "cancelled", None
+        ctx.session.commit()
 
 
 def flow_active(state: dict) -> bool:

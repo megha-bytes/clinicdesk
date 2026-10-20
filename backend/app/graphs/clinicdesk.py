@@ -114,6 +114,8 @@ CONSENT_TEXT = {                 # short enough to read aloud; covers what, why,
     "hi": "हम आपका नाम, उम्र और फ़ोन सिर्फ़ {clinic} में आपकी अपॉइंटमेंट के लिए रखेंगे। आप इसे कभी भी हटवा सकते हैं। ठीक है?",
     "kn": "ನಿಮ್ಮ ಹೆಸರು, ವಯಸ್ಸು ಮತ್ತು ಫೋನ್ ಅನ್ನು {clinic} ನಲ್ಲಿ ನಿಮ್ಮ ಅಪಾಯಿಂಟ್‌ಮೆಂಟ್‌ಗಾಗಿ ಮಾತ್ರ ಇಡುತ್ತೇವೆ. ಯಾವಾಗ ಬೇಕಾದರೂ ಅಳಿಸಲು ಹೇಳಬಹುದು. ಸರಿಯೇ?",
 }
+NO_WORDS = {"no", "n", "nope", "nah", "cancel", "nahi", "nahin", "na", "mat", "illa", "beda", "nahi ji", "नहीं", "ना",
+            "ಇಲ್ಲ", "ಬೇಡ"}
 YES_WORDS = {"yes", "y", "ok", "okay", "sure", "confirm", "haan", "ha", "han", "ji", "haan ji", "हाँ", "हां", "ಹೌದು", "sari", "ಸರಿ"}
 
 
@@ -211,6 +213,14 @@ def _typed_by_patient(args: dict, messages: list[dict]) -> str | None:
     if not re.search(r"\b%d\b" % int(args.get("age", -1) or -1), said):
         return "Ask the patient for their age; don't guess it."
     return None
+
+
+def is_no(value: Any) -> bool:
+    if isinstance(value, dict):
+        value = value.get("approved", value.get("answer"))
+    if isinstance(value, bool):
+        return not value
+    return str(value or "").strip().lower().strip(".!") in NO_WORDS
 
 
 def is_yes(value: Any) -> bool:
