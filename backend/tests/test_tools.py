@@ -322,3 +322,20 @@ def test_a2a_bookings_are_tagged(ctx):
     assert row.source == "a2a"
     actors = ctx.session.scalars(select(m.AuditLog.actor).where(m.AuditLog.entity_id == row.id)).all()
     assert set(actors) == {"a2a"}
+
+
+def test_window_limits_timed_options_when_possible(session):
+    """'tomorrow morning' offered 12:25 PM and 7:40 PM in a live run (DEVLOG #43)."""
+    from datetime import datetime, time
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import select
+    from app import models as m
+    from app.agent.tools import ToolContext, run_tool
+    from app.seed import seed
+    now = datetime(2026, 10, 12, 9, 47, tzinfo=ZoneInfo("Asia/Kolkata"))
+    cid = seed(session, now=now)["clinic_id"]
+    rao = session.scalar(select(m.Doctor).where(m.Doctor.name == "Dr. Ananya Rao"))
+    ctx = ToolContext(session=session, clinic_id=cid, now=now)
+    out = run_tool("find_slots", {"appointment_type": "new", "doctor_id": rao.id, "date": "tomorrow", "window": "morning"}, ctx)
+    assert out["ok"] and out["slots"]
+    assert all(datetime.fromisoformat(s["start"]).time() < time(12, 0) for s in out["slots"])

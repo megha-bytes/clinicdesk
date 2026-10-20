@@ -364,6 +364,10 @@ def find_slots(ctx: ToolContext, args: FindSlotsIn) -> dict:
                     timed_candidates.append((doc, s))
         day += timedelta(days=1)
 
+    if window:                       # "morning" means morning: offer only times in that part of the day, if any
+        in_window = [(d, sl) for d, sl in timed_candidates if window[0] <= sl.start.astimezone(tz).time() < window[1]]
+        if in_window:
+            timed_candidates = in_window
     prefs = eng.Preferences(preferred_start=preferred, window=window, preferred_doctor_id=args.doctor_id,
                             previous_doctor_id=args.previous_doctor_id, language=args.language)
     for r in eng.rank_slots(timed_candidates, bookings, prefs, now, tz, k=3):

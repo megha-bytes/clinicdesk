@@ -49,6 +49,7 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 40 | Dashboard looked empty after a booking: it was for tomorrow while the dashboard showed today (Dr. Iyer doesn't work Tuesdays) | Oct 20 | ✅ Fixed | "New booking … Show that day" notice for bookings on another day; "Not in today" on columns with no hours |
 | 41 | Laptop: `.env.local` line `OTEL_EXPORTER_OTLP_ENDPOINT=   # http://…` was read as the address → gRPC URI errors at startup | Oct 20 | ✅ Fixed | Comment-only values treated as empty; `.env.example` comment moved to its own line |
 | 42 | Downloaded `.patch` files and SQLite `-wal/-shm` files sitting untracked in the repo | Oct 20 | ✅ Fixed | Added to `.gitignore` |
+| 43 | First real A2A booking (laptop, real Nemotron, companion): worked end to end (consent + confirmation asked of the human, booked 11:15); but "tomorrow morning" offered 12:25 PM and 7:40 PM | Oct 20 | ✅ Fixed | For timed doctors a requested part of the day now limits the options when any slot fits (it was only a ranking preference) |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
