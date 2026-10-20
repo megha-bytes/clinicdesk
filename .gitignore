@@ -42,3 +42,4 @@ traces.jsonl
 *.patch
 *.db-shm
 *.db-wal
+companion/profile.json

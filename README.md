@@ -125,6 +125,26 @@ by step during a conversation, with every model call (tier, latency, cost), tool
 "Today" shows bookings, model cost per booking, typical latency, guardrail decisions and the red-team result.
 Patient names are shortened and phone numbers hidden; set `STAFF_DASHBOARD_TOKEN` to require `?token=`.
 
+## A2A: the clinic as an agent
+
+Other AI agents can discover the clinic and book for a patient over the open **A2A** protocol (`a2a-sdk` 1.2).
+
+- **Agent Card:** `/.well-known/agent-card.json` with 5 skills (book, check availability, reschedule/cancel,
+  queue status, clinic info) and API-key auth (`X-API-Key`).
+- **JSON-RPC endpoint:** `/a2a`, with streaming status lines ("Checking Dr. Rao's calendar…").
+- **Same safety as patients:** the same LangGraph workflow, guardrails, consent and confirmation. Consent and
+  confirmation cards come back as task state `input-required`, so the calling agent has to ask the patient.
+  Emergencies complete immediately with `metadata.escalated = true`. A booking returns a JSON artifact.
+- Bookings are tagged `a2a` with the calling agent's id (network icon on the staff dashboard); per-caller rate
+  limits; keys are stored as hashes (`py -m app.a2a.auth create "Name"`), or set `A2A_DEMO_KEY` on Render.
+
+**Patient Companion** (`companion/companion.py`): a personal-assistant agent that reads the Agent Card, writes
+the request with the patient's saved details, picks the slot that fits their preferences with Nemotron Nano,
+and always asks the human before answering consent or confirmation.
+```bash
+py companion/companion.py --clinic http://localhost:8000 --key cdk_... "Book Dr. Rao tomorrow morning"
+```
+
 ## Red-team suite
 
 61 scripted attack and edge-case conversations in `backend/redteam/cases.yaml` across 10 categories:

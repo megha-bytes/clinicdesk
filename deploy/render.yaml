@@ -30,6 +30,10 @@ services:
         value: mock
       - key: DEMO_RESET_TOKEN       # long random string; also stored as a GitHub Actions secret
         sync: false
+      - key: A2A_DEMO_KEY           # API key for the demo Patient Companion (A2A); keep it out of the repo
+        sync: false
+      - key: REDTEAM_TOKEN          # lets the nightly red-team run skip the per-IP rate limit
+        sync: false
 
   # Patient app (React, built to static files). Free static sites don't sleep.
   - type: web

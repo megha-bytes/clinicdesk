@@ -670,6 +670,29 @@ appeared within the turn. Fixes during review: 10-minute visits overlapped at 1.
 scrolling grid; straight X-ray edges crossed boxes → curved edges; back edges clipped → wider viewBox.
 Tests: backend **412 passed** (7 new staff tests, weekday-independent); frontend 6 passed; build 62 KB gzip.
 
+### 2026-10-20 · Day 17: A2A server and Patient Companion
+
+Server (`app/a2a/`): `a2a-sdk[http-server]` 1.2.1 (1.2.3 was a day old; 1.2.1 is the newest ≥2 weeks).
+Agent Card with 5 skills + API-key security scheme; JSON-RPC at `/a2a`; `ClinicDeskExecutor` runs each task
+through a second compiled ClinicDeskGraph sharing the router and checkpointer, with `channel="a2a"` and the
+caller id (passed into graph threads through a contextvar, which `asyncio.to_thread` and LangGraph copy).
+context_id → thread `a2a-<context_id>`; interrupts → `input-required` with the card as a JSON data part;
+options/details → `input-required` with `options`/`needs`; booking → artifact + completed; emergency →
+completed with `metadata.escalated`; status lines → streamed `working` updates. Auth: SHA-256-hashed keys in
+`a2a_caller`, `A2A_DEMO_KEY` bootstrap, per-caller rate limit, global spend cap.
+
+Companion (`companion/companion.py`): reads the card, Nemotron Nano writes the request and picks a slot by the
+profile's preferences (rules fallback without a key), fills name/phone/age from the profile, hands over to the
+human for every consent/confirmation and whenever the clinic repeats a question.
+
+End-to-end against a local server (fake model): companion booked Dr. Farah Khan 10:00 for "Kiran Shetty"
+(asked the human twice), dashboard showed "Kiran S." with source a2a. Bugs found on the way: streamed results
+arrive as status updates, not task snapshots (companion read only the first snapshot); A2A data parts carry
+numbers as floats ("1.0" wasn't read as option 1); companion resent details when asked "which doctor"; reading
+input with no human now answers nothing instead of crashing.
+Tests: **423 passed** on SQLite and Postgres (9 A2A: card, bad key, full booking over A2A with source/caller/
+audit/dashboard checks, decline, emergency escalation, injection, per-caller rate limit, streaming, demo key).
+
 ---
 
 ## How to add an entry

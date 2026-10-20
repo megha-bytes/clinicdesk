@@ -56,6 +56,12 @@ app.include_router(chat_router)
 app.include_router(ops_router)
 app.include_router(staff_router)
 
+try:                                     # A2A: /.well-known/agent-card.json and /a2a
+    from app.a2a.server import mount_a2a
+    mount_a2a(app)
+except ImportError:                      # a2a-sdk not installed
+    pass
+
 
 @app.head("/", include_in_schema=False)
 @app.get("/")

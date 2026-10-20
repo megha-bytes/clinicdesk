@@ -8,7 +8,8 @@ openai>=1.40
 langgraph>=1.0
 langgraph-checkpoint-sqlite>=3.0
 langgraph-checkpoint-postgres>=3.0
-ag-ui-protocol==1.0.0   # AG-UI event format for the patient app stream
+ag-ui-protocol==1.0.0
+a2a-sdk[http-server]==1.2.1   # A2A server (Agent Card + JSON-RPC), lets other agents book   # AG-UI event format for the patient app stream
 nemoguardrails==0.24.1 ; python_version < "3.14"   # NVIDIA NeMo Guardrails (not yet on 3.14; same checks run directly there)
 python-dotenv>=1.0
 pyyaml>=6.0

@@ -46,21 +46,29 @@ _lock = Lock()
 
 
 class _Runtime:
-    """Lazily built graph + model router (overridable in tests)."""
+    """Lazily built graph + model router + checkpointer (overridable in tests). The A2A server builds its
+    own graph from the same router and checkpointer (app/a2a/executor.py)."""
     graph = None
     router = None
+    checkpointer = None
+
+    @classmethod
+    def parts(cls):
+        from app.agent.models import default_router
+        from app.graphs.checkpointer import make_checkpointer
+        try:
+            cls.router = cls.router or default_router()
+        except RuntimeError as e:
+            raise HTTPException(503, "The assistant isn't configured yet.") from e
+        if cls.checkpointer is None:
+            cls.checkpointer = make_checkpointer(get_settings().database_url)
+        return cls.router, cls.checkpointer
 
     @classmethod
     def get(cls):
         if cls.graph is None:
-            from app.agent.models import default_router
-            from app.graphs.checkpointer import make_checkpointer
-
-            try:
-                cls.router = cls.router or default_router()
-            except RuntimeError as e:
-                raise HTTPException(503, "The assistant isn't configured yet.") from e
-            cls.graph = build_graph(cls.router, _make_ctx, make_checkpointer(get_settings().database_url))
+            router, checkpointer = cls.parts()
+            cls.graph = build_graph(router, _make_ctx, checkpointer)
         return cls.graph
 
 
@@ -102,11 +110,16 @@ def _guard(request: Request) -> None:
         if len(q) >= RATE_LIMIT:
             raise HTTPException(429, "Too many messages. Please wait a few minutes.")
         q.append(now)
+    if not spend_ok():
+        raise HTTPException(503, "The demo has reached today's usage limit. Please try again tomorrow.")
+
+
+def spend_ok() -> bool:
+    """Today's model spend (from the cost ledger) is under DAILY_SPEND_CAP_USD."""
     with SessionLocal() as s:
         start = datetime.combine(datetime.now(timezone.utc).date(), dtime.min, tzinfo=timezone.utc)
         spent = s.scalar(select(func.coalesce(func.sum(m.LLMCall.cost_usd), 0.0)).where(m.LLMCall.at >= start))
-    if spent >= get_settings().daily_spend_cap_usd:
-        raise HTTPException(503, "The demo has reached today's usage limit. Please try again tomorrow.")
+    return spent < get_settings().daily_spend_cap_usd
 
 
 class TurnIn(BaseModel):
