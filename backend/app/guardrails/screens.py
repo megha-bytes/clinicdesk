@@ -115,7 +115,9 @@ def _nemo() -> _Nemo | None:
             _engine = _Nemo()
             log.info("guardrails: NVIDIA NeMo Guardrails engine loaded")
         except Exception as e:  # noqa: BLE001  (not installed, or failed to load: use the direct runner)
-            log.warning("guardrails: NeMo Guardrails unavailable (%s); running checks directly", type(e).__name__)
+            # Not installed (e.g. Python 3.14) is expected: info, not a warning. A broken install is a warning.
+            (log.info if isinstance(e, ModuleNotFoundError) else log.warning)(
+                "guardrails: NeMo Guardrails unavailable (%s); running checks directly", type(e).__name__)
             _engine = False
     return _engine or None
 

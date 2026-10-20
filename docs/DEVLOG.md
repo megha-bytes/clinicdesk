@@ -526,6 +526,42 @@ the agent, Ultra handoff, output medical advice replaced.
 Plan check (Day 9 "Done when"): ✅ emergency caught in all 3 languages even if the model is down ·
 ✅ an invented time/fee never reaches the patient.
 
+### 2026-10-20 · Day 11: real-time layer (AG-UI SSE for patients, WebSocket for staff)
+
+Live checks first (patch 11): `cli_chat` "I have severe chest pain" → 108/112 reply, staff alerted, 1.2 s
+(direct engine on the laptop, Python 3.14). Live `/health`: `"guardrails": "nemo-guardrails"` ✅.
+
+Built:
+- `realtime/emit.py`: steps report PII-free events through LangGraph's stream writer; `run_tool` emits
+  tool started/finished (+ doctor name and slot time for status lines), booking changes, emergencies and
+  handoffs; the model router emits every call with tier, tokens, latency and cost; guardrails emit `rail.fired`.
+- `realtime/runner.py`: runs a turn with `graph.stream(stream_mode=["tasks", "custom"])` and converts it
+  to ExecutionEvents: node started/finished, friendly status lines in en/hi/kn ("Checking Dr. Ananya Rao's
+  calendar…"), tool calls, model calls (cost), interrupts (cards), run finished (reply, total cost, ms).
+  Each event goes to the patient's thread channel and a PII-free copy (no reply text) to the clinic's ops channel.
+- `realtime/hub.py`: in-process pub/sub with per-channel cursors and 200-event history for reconnects;
+  a slow client drops its oldest events instead of blocking the graph.
+- `realtime/agui.py`: maps events to the **AG-UI protocol** (`ag-ui-protocol` 1.0.0).
+- Endpoints: `POST /chat/stream`, `POST /chat/answer/stream` (AG-UI SSE), `GET /chat/{id}/events`
+  (replay + live), `WS /ops/ws` + `GET /ops/recent` (staff, optional token). `/chat/turn` and
+  `/chat/answer` also feed the staff channel now. `cli_chat` prints the live status lines.
+
+Real server + slow fake model (0.8 s per call), `curl -N /chat/stream` arrival times:
+```
+ 0.80s CUSTOM status Reading your message…        ← before the model has answered
+ 1.80s CUSTOM model_call / STEP_FINISHED intent
+ 1.84s CUSTOM status Looking up your details…  /  TOOL_CALL_START find_patient
+ 1.84s CUSTOM status Checking Dr. Ananya Rao's calendar…  /  TOOL_CALL_START find_slots
+ 1.85s CUSTOM interrupt consent  /  RUN_FINISHED
+```
+The staff WebSocket received the same steps at the same moments, with no patient name, phone or reply.
+
+Tests: **330 passed** on SQLite and Postgres (11 new: event order, status lines incl. Hindi, cost events =
+ledger rows, ops channel PII-free, booking/emergency/guardrail events to staff, AG-UI stream for a full
+booking, 409 on pending card, WebSocket replay, staff token, reconnect replay, slow-client hub).
+
+Also: the "NeMo Guardrails unavailable" line on Python 3.14 is now an info log, not a warning.
+
 ---
 
 ## How to add an entry

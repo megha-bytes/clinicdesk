@@ -94,6 +94,18 @@ Asking for a person hands over to staff with a 2-line note written by Nemotron U
 logged in `guardrail_event` (no patient text). `/health` shows which engine is running (`nemo-guardrails`
 in the container; on Python 3.14, where NeMo isn't available yet, the same checks run directly).
 
+## Real-time layer
+
+Every graph step streams live, so the patient sees what the agent is doing and staff see bookings arrive.
+
+| Endpoint | Who | Format |
+|---|---|---|
+| `POST /chat/stream`, `POST /chat/answer/stream` | patient app | **AG-UI** events over SSE: `RUN_STARTED`, `STEP_STARTED/FINISHED` (graph nodes), `TOOL_CALL_START/END`, `TEXT_MESSAGE_*` (reply), `CUSTOM` (status line, confirmation card, guardrail, emergency, booking, model call), `RUN_FINISHED` |
+| `GET /chat/{thread_id}/events?after=N` | patient app (reconnect) | replay + live, SSE with `id:` cursors (`Last-Event-ID` supported) |
+| `WS /ops/ws?after=N`, `GET /ops/recent` | staff dashboard | JSON events, PII-free (no patient names, phones or replies); optional `STAFF_DASHBOARD_TOKEN` |
+
+Try it: `curl -N -X POST https://clinicdesk-api.onrender.com/chat/stream -H "content-type: application/json" -d "{\"text\": \"Dr Rao tomorrow\"}"`
+
 ## Try the live agent
 
 Open `https://clinicdesk-api.onrender.com/docs`:

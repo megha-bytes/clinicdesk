@@ -18,7 +18,8 @@ from app.agent.models import MemoryLedger, ModelRouter, load_tiers
 from app.agent.tools import ToolContext
 from app.db import Base, SessionLocal, engine
 from app.graphs.checkpointer import make_checkpointer
-from app.graphs.clinicdesk import answer, build_graph, send
+from app.graphs.clinicdesk import build_graph
+from app.realtime import runner
 from app.seed import seed
 from app.settings import get_settings
 
@@ -34,6 +35,12 @@ class TeeLedger(MemoryLedger):
     def record(self, rec) -> None:
         super().record(rec)
         self.db.record(rec)
+
+
+def show_status(ev: dict) -> None:
+    """Print the live status lines the patient app will show ("Checking Dr. Rao's calendar…")."""
+    if ev["type"] == "status":
+        print(f"      · {ev['payload']['text']}")
 
 
 def main() -> None:
@@ -81,14 +88,14 @@ def main() -> None:
             if not text:
                 continue
             start = len(ledger.records)
-            out = send(graph, thread_id, text)
+            out = runner.run(graph, thread_id, text=text, on_event=show_status)
             tools_used = list(out["tools"])
             while out["interrupt"]:
                 q = out["interrupt"]
                 label = "CONSENT" if q["kind"] == "consent" else "CONFIRM"
                 print(f"desk> [{label}] {q['summary']}")
                 yn = input("      yes/no> ").strip()
-                out = answer(graph, thread_id, yn)
+                out = runner.run(graph, thread_id, approved=yn, on_event=show_status)
                 tools_used += out["tools"]
             print(f"desk> {out['reply']}")
             turn = ledger.records[start:]

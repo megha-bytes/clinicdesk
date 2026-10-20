@@ -46,6 +46,7 @@ from app.graphs.language import detect as detect_language
 from app.guardrails import check_input, check_output
 from app.guardrails.messages import msg as guard_msg
 from app.guardrails.rules import NOT_URGENT
+from app.realtime.emit import emit
 
 log = logging.getLogger(__name__)
 
@@ -485,6 +486,8 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
         v = check_input(user, model_emergency=bool(ext.get("emergency")), model_medical=bool(ext.get("medical_question")))
         if v.ok:
             return {"guard": None}
+        emit("rail.fired", node="guard_in", rail=v.rail, kind=v.kind, engine=v.engine,
+             outcome="escalate" if v.kind == "emergency" else "block")
         if v.kind != "emergency":                              # emergencies are logged by raise_emergency_alert
             _log_event(ctx, state, v.rail, v.kind, "block", v.detail or v.kind)
         lang = state.get("language", "en")
@@ -565,6 +568,7 @@ def build_graph(router: ModelRouter, make_ctx: Callable[[], ToolContext], checkp
                 ov = check_output(reply, allowed)                  # output rail (NeMo Guardrails)
                 if not ov.ok:
                     _log_event(ctx, state, ov.rail, ov.kind, "block", ov.detail)
+                    emit("rail.fired", node="respond", rail=ov.rail, kind=ov.kind, engine=ov.engine, outcome="block")
                     problem = (f"Your reply was blocked ({ov.detail}). Rewrite it without that; "
                                "never give medical advice; use only facts from TOOL RESULTS.")
             if not problem:

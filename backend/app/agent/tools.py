@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -632,6 +633,36 @@ def openai_tool_specs(names: list[str] | None = None) -> list[dict]:
 
 
 def run_tool(name: str, args: dict | None, ctx: ToolContext, *, allow_hidden: bool = False) -> dict:
+    """Run a tool and report it to the live event stream (PII-free: tool, doctor, time, outcome)."""
+    from app.realtime.emit import emit
+    call_id = uuid.uuid4().hex[:12]
+    emit("tool.started", tool=name, call_id=call_id, **_public_args(name, args or {}, ctx))
+    out = _run_tool(name, args, ctx, allow_hidden=allow_hidden)
+    emit("tool.finished", tool=name, call_id=call_id, ok=bool(out.get("ok")), error=out.get("error"))
+    if out.get("ok") and name in ("book", "reschedule", "cancel"):
+        emit("booking.changed", action=name, appointment_id=out.get("appointment_id"), doctor=out.get("doctor"),
+             when=out.get("when"), status=out.get("status"), token_no=out.get("token_no"), channel=ctx.channel)
+    if out.get("ok") and name == "raise_emergency_alert":
+        emit("emergency", conversation_id=ctx.conversation_id)
+    if out.get("ok") and name == "handoff_to_staff":
+        emit("handoff", conversation_id=ctx.conversation_id)
+    return out
+
+
+def _public_args(name: str, args: dict, ctx: ToolContext) -> dict:
+    """Doctor name and slot time for status lines; nothing about the patient."""
+    out: dict = {}
+    try:
+        if args.get("doctor_id") and (d := ctx.session.get(m.Doctor, args["doctor_id"])):
+            out["doctor"] = d.name
+        if args.get("start"):
+            out["when"] = label(parse_start(args["start"], ctx), ctx.tz).split(", ")[-1]
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _run_tool(name: str, args: dict | None, ctx: ToolContext, *, allow_hidden: bool = False) -> dict:
     tool = TOOLS.get(name)
     if tool is None or (not tool.model_visible and not allow_hidden):
         return fail("UNKNOWN_TOOL", f"No tool named {name!r}.")

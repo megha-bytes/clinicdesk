@@ -293,6 +293,9 @@ class ModelRouter:
                     input_tokens=usage_in, output_tokens=usage_out, cost_usd=cost, latency_ms=round(latency, 1),
                     ok=ok, trace_id=format(ctx.trace_id, "032x") if ctx.trace_id else None,
                     span_id=format(ctx.span_id, "016x") if ctx.span_id else None))
+                from app.realtime.emit import emit
+                emit("model.call", node=node, tier=tier, model=cfg.model, purpose=purpose, ok=ok,
+                     input_tokens=usage_in, output_tokens=usage_out, cost_usd=cost, latency_ms=round(latency, 1))
 
         msg = resp.choices[0].message
         content, leaked = clean_reply(getattr(msg, "content", None))
