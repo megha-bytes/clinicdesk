@@ -3,6 +3,8 @@
 > An always-on clinic receptionist that books, confirms and reschedules appointments, registers patients, collects fees through payment links and runs the token queue, in English, Hindi and Kannada. It never gives medical advice, every action passes through guardrails, and any AI agent can book with the clinic over the open **A2A** protocol.
 
 Built for the **Nebius × NVIDIA Global AI Hackathon** (Best Apps and Agents track).
+<img width="601" height="862" alt="image" src="https://github.com/user-attachments/assets/69d23a06-2199-4bb7-a8d3-ba5d273d10f2" />
+
 
 🚧 **Status:** in active development (Oct 2026).
 
