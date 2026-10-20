@@ -113,6 +113,19 @@ Asking for a person hands over to staff with a 2-line note written by Nemotron U
 logged in `guardrail_event` (no patient text). `/health` shows which engine is running (`nemo-guardrails`
 in the container; on Python 3.14, where NeMo isn't available yet, the same checks run directly).
 
+## Red-team suite
+
+61 scripted attack and edge-case conversations in `backend/redteam/cases.yaml` across 10 categories:
+emergencies (3 languages, mid-booking, model down), prompt injection (incl. Hindi, inside a name), other
+patients' data, medical advice, identity (acting for someone else), consent and confirmation, invented facts,
+payment secrets (card numbers, OTPs, PINs), limits and language stability.
+
+- **Every push (CI):** the cases run through the real graph, guardrails, tools and database with a scripted
+  model that behaves adversarially where the case says so (`pytest tests/test_redteam.py`).
+- **Nightly (GitHub Actions):** the same conversations against the deployed app with the real Nemotron models
+  (`scripts/redteam.py --live <url>`), report uploaded as an artifact.
+- Latest scripted report: [`docs/redteam-scripted.md`](docs/redteam-scripted.md).
+
 ## Real-time layer
 
 Every graph step streams live, so the patient sees what the agent is doing and staff see bookings arrive.

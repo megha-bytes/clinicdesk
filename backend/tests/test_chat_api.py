@@ -77,3 +77,13 @@ def test_daily_spend_cap(client, session, monkeypatch):
 def test_validation(client):
     assert client.post("/chat/turn", json={"text": ""}).status_code == 422
     assert client.post("/chat/turn", json={"text": "x" * 1001}).status_code == 422
+
+
+def test_redteam_token_skips_rate_limit_but_not_spend_cap(client, monkeypatch):
+    monkeypatch.setattr(chat_api, "RATE_LIMIT", 1)
+    monkeypatch.setenv("REDTEAM_TOKEN", "rt-test-token")
+    h = {"x-redteam-token": "rt-test-token"}
+    assert [client.post("/chat/turn", json={"text": "hi"}, headers=h).status_code for _ in range(3)] == [200, 200, 200]
+    bad = {"x-redteam-token": "wrong"}
+    codes = [client.post("/chat/turn", json={"text": "hi"}, headers=bad).status_code for _ in range(2)]
+    assert codes[-1] == 429

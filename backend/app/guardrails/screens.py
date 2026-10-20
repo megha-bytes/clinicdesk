@@ -20,7 +20,8 @@ from app.guardrails import rules
 
 log = logging.getLogger(__name__)
 
-INPUT_RAILS = [("emergency_screen", "screen_emergency"), ("injection_screen", "screen_injection"),
+INPUT_RAILS = [("emergency_screen", "screen_emergency"), ("payment_secret_screen", "screen_payment"),
+               ("injection_screen", "screen_injection"),
                ("privacy_screen", "screen_privacy"), ("medical_advice_screen", "screen_medical")]
 
 _ctx: contextvars.ContextVar[dict] = contextvars.ContextVar("guard_ctx", default={})
@@ -54,6 +55,11 @@ async def screen_injection(text: str = "") -> str:
     return "injection" if rules.INJECTION.search(text or "") else "ok"
 
 
+async def screen_payment(text: str = "") -> str:
+    """Card numbers, OTPs, PINs: never accepted in chat; payment only through the clinic's link."""
+    return "payment" if rules.PAYMENT_SECRET.search(text or "") else "ok"
+
+
 async def screen_privacy(text: str = "") -> str:
     return "privacy" if rules.PRIVACY.search(text or "") else "ok"
 
@@ -83,7 +89,7 @@ async def screen_output(text: str = "") -> str:
     return "ok"
 
 
-ACTIONS = {"screen_emergency": screen_emergency, "screen_injection": screen_injection,
+ACTIONS = {"screen_emergency": screen_emergency, "screen_payment": screen_payment, "screen_injection": screen_injection,
            "screen_privacy": screen_privacy, "screen_medical": screen_medical, "screen_output": screen_output}
 
 
@@ -153,7 +159,8 @@ def _sync(fn, text: str) -> str:
     raise RuntimeError("guardrail action awaited unexpectedly")
 
 
-_RAIL_NAMES = {"clinicdesk emergency screen": "emergency_screen", "clinicdesk injection screen": "injection_screen",
+_RAIL_NAMES = {"clinicdesk emergency screen": "emergency_screen", "clinicdesk payment secret screen": "payment_secret_screen",
+               "clinicdesk injection screen": "injection_screen",
                "clinicdesk privacy screen": "privacy_screen", "clinicdesk medical advice screen": "medical_advice_screen",
                "clinicdesk output screen": "output_screen"}
 

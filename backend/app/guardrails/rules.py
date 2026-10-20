@@ -57,7 +57,15 @@ INJECTION = _rx(
     r"\b(system|developer) prompt\b", r"\byou are now\b", r"\bdeveloper mode\b", r"\bjail ?break",
     r"\bpretend (to be|you are)\b", r"\bact as (an? )?(admin|developer|doctor|system)",
     r"\breveal (your|the) (prompt|instructions|rules)", r"\bdo anything now\b", r"\bDAN\b",
-    r"</?(system|assistant)>", r"\[\s*(system|inst)\s*\]")
+    r"</?(system|assistant)>", r"\[\s*(system|inst)\s*\]",
+    r"\b(admin|developer|system) (override|mode|access)\b",
+    r"\b(pichhl|pichl|pehle)\w* (sabhi |saare |sab )?(nirdesh|instructions?) (bhool|ignore|chhod)", r"निर्देश (भूल|अनदेखा)",
+    r"\b(hinde|hinda)\w* (ella )?suchane\w* (mare|ignore)", r"ಸೂಚನೆ\w* ಮರೆ")
+
+PAYMENT_SECRET = _rx(
+    r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)",                         # a card number (phones are 10 digits)
+    r"\b(cvv|cvc)\b", r"\b(otp|one[- ]time password)\b\s*(is|:|-)?\s*\d{4,8}", r"\bupi ?pin\b", r"\batm ?pin\b",
+    r"\b(card|debit|credit) (number|no\.?)\b\s*(is|:)?\s*\d", r"\bnet ?banking (password|login)\b")
 
 PRIVACY = _rx(
     r"\b(other|another|all) (patients?|people)('s)?\b.*\b(phone|number|name|details|appointments?|list)",

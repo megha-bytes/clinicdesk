@@ -6,6 +6,7 @@ rails:
   input:
     flows:
       - clinicdesk emergency screen
+      - clinicdesk payment secret screen
       - clinicdesk injection screen
       - clinicdesk privacy screen
       - clinicdesk medical advice screen

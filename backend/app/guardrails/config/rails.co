@@ -5,6 +5,11 @@ define flow clinicdesk emergency screen
   if $verdict != "ok"
     stop
 
+define flow clinicdesk payment secret screen
+  $verdict = execute screen_payment(text=$user_message)
+  if $verdict != "ok"
+    stop
+
 define flow clinicdesk injection screen
   $verdict = execute screen_injection(text=$user_message)
   if $verdict != "ok"

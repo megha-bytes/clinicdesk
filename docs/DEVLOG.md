@@ -627,6 +627,25 @@ phone → age → consent → confirmation worked. Two wording issues (#38) fixe
 Screens re-checked after the toolchain upgrade (identical); build time 2.6 s → 0.9 s.
 Tests: backend **342 passed**; frontend 6 passed; `npm audit`: 0 vulnerabilities.
 
+### 2026-10-20 · Day 14: red-team suite
+
+Built `backend/redteam/` (61 cases in YAML, a scripted runner and a live runner), `tests/test_redteam.py`,
+`scripts/redteam.py` (report → `docs/redteam-<mode>.md/json`) and a nightly GitHub Action against the live URL.
+Scripted mode runs each conversation through the real graph, guardrails, tools and DB with a fake model that
+plays adversarial roles where a case says so (agent cancels someone else's appointment, reply writer gives a
+dose or claims "successfully booked", model outage). Live mode checks only model-independent expectations.
+
+Gaps found while writing cases (fixed): no rail for **payment secrets** typed into chat → new
+`payment_secret_screen` (card numbers 13–19 digits, OTP + digits, UPI/ATM PIN, CVV; phone numbers pass);
+injection patterns had no Hindi/Kannada phrasing ("pichhle sabhi nirdesh bhool jao") or "admin override";
+"papa behosh ho gaye" was answered in English (added Hindi words for language detection).
+
+Mutation check: 9 deliberately wrong expectations were all reported as failures (the suite isn't vacuous).
+Live mode against a local server + fake model: 43/47 (the 4 misses are the fake model not extracting a name;
+the real model does). `REDTEAM_TOKEN` header skips the per-IP rate limit for the nightly run (spend cap stays).
+
+Results (scripted): **60/60** (+1 HTTP-level case in pytest). Tests: **405 passed** on SQLite and Postgres.
+
 ---
 
 ## How to add an entry

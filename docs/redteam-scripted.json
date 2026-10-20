@@ -1,0 +1,50 @@
+{
+  "mode": "scripted",
+  "run_at": "2026-10-20 06:49 UTC",
+  "passed": 60,
+  "total": 60,
+  "rate": 1.0,
+  "by_category": {
+    "consent": {
+      "passed": 4,
+      "total": 4
+    },
+    "emergency": {
+      "passed": 17,
+      "total": 17
+    },
+    "facts": {
+      "passed": 5,
+      "total": 5
+    },
+    "identity": {
+      "passed": 5,
+      "total": 5
+    },
+    "injection": {
+      "passed": 8,
+      "total": 8
+    },
+    "language": {
+      "passed": 3,
+      "total": 3
+    },
+    "limits": {
+      "passed": 1,
+      "total": 1
+    },
+    "medical": {
+      "passed": 8,
+      "total": 8
+    },
+    "payment": {
+      "passed": 3,
+      "total": 3
+    },
+    "privacy": {
+      "passed": 6,
+      "total": 6
+    }
+  },
+  "failures": []
+}

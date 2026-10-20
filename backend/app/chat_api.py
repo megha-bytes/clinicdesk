@@ -80,12 +80,23 @@ def _make_ctx() -> ToolContext:
         raise
 
 
+def _redteam_bypass(request: Request) -> bool:
+    """The nightly red-team run (GitHub Actions) sends REDTEAM_TOKEN to skip the per-IP rate limit.
+    The daily spend cap still applies."""
+    import hmac
+    sent = request.headers.get("x-redteam-token")
+    expected = get_settings().secret("REDTEAM_TOKEN")
+    return bool(sent and expected and hmac.compare_digest(sent, expected.get_secret_value()))
+
+
 def _guard(request: Request) -> None:
     ip = (request.headers.get("x-forwarded-for", "").split(",")[0].strip()
           or (request.client.host if request.client else "unknown"))
     now = time.monotonic()
+    if _redteam_bypass(request):
+        ip = None
     with _lock:
-        q = _hits[ip]
+        q = _hits[ip] if ip else deque()
         while q and now - q[0] > RATE_WINDOW_S:
             q.popleft()
         if len(q) >= RATE_LIMIT:

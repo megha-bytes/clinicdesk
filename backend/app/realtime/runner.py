@@ -85,7 +85,7 @@ def ui_hints(values: dict) -> dict:
         from app.guardrails.messages import DEFAULT_NUMBERS
         ui["emergency"] = {"kind": guard.get("detail"), "numbers": {**DEFAULT_NUMBERS,
                                                                     **(values.get("emergency_numbers") or {})}}
-    elif guard.get("kind") in ("injection", "privacy", "medical"):
+    elif guard.get("kind") in ("injection", "privacy", "medical", "payment"):
         ui["refused"] = guard["kind"]
     if any(r.get("tool") == "handoff_to_staff" and (r.get("result") or {}).get("ok")
            for r in values.get("tool_results") or []):
