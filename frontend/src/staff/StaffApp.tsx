@@ -1,0 +1,104 @@
+import { clsx } from "clsx";
+import { ChevronLeft, ChevronRight, Volume2, VolumeX } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type Alert, type Appt, type Graph, type Schedule as ScheduleData, type Stats, staffGet, staffPost } from "./api";
+import { Alerts, Numbers } from "./Panels";
+import { Schedule } from "./Schedule";
+import { chime, useStaffFeed } from "./useStaffFeed";
+import { XRay } from "./XRay";
+
+const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+export default function StaffApp() {
+  const [day, setDay] = useState(() => iso(new Date()));
+  const [schedule, setSchedule] = useState<ScheduleData | null>(null);
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [handled, setHandled] = useState<Set<string>>(new Set());
+  const [graph, setGraph] = useState<Graph | null>(null);
+  const [flash, setFlash] = useState<Set<string>>(new Set());
+  const [sound, setSound] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const soundRef = useRef(sound);
+  soundRef.current = sound;
+
+  const loadSchedule = useCallback(() => staffGet<ScheduleData>("/ops/schedule", { day }).then(setSchedule).catch(() => setError("Couldn't load the schedule.")), [day]);
+  const loadStats = useCallback(() => staffGet<Stats>("/ops/stats").then(setStats).catch(() => {}), []);
+  const loadAlerts = useCallback(() => staffGet<{ alerts: Alert[] }>("/ops/alerts").then((r) => setAlerts(r.alerts)).catch(() => {}), []);
+
+  useEffect(() => { loadSchedule(); }, [loadSchedule]);
+  useEffect(() => { loadStats(); loadAlerts(); staffGet<Graph>("/ops/graph").then(setGraph).catch(() => {}); }, [loadStats, loadAlerts]);
+
+  const { runs, connected } = useStaffFeed({
+    booking: (e) => {
+      const id = String(e.payload.appointment_id ?? "");
+      loadSchedule();
+      if (id) {
+        setFlash((f) => new Set(f).add(id));
+        setTimeout(() => setFlash((f) => { const n = new Set(f); n.delete(id); return n; }), 4000);
+      }
+    },
+    alert: (e) => { loadAlerts(); if (e.type === "emergency" && soundRef.current) chime(); },
+    finished: () => loadStats(),
+  });
+
+  const run = useMemo(() => runs.find((r) => r.id === selected) ?? runs[0] ?? null, [runs, selected]);
+  useEffect(() => { if (runs[0] && !runs[0].finished) setSelected(null); }, [runs]);
+
+  const act = async (a: Appt, action: string) => {
+    try { await staffPost(`/ops/appointments/${a.id}/${action}`); setError(null); }
+    catch (e) { setError(e instanceof Error ? e.message : "That didn't work."); }
+  };
+  const shift = (n: number) => { const d = new Date(`${day}T12:00:00`); d.setDate(d.getDate() + n); setDay(iso(d)); };
+  const isToday = day === iso(new Date());
+  const visibleAlerts = alerts.filter((a) => !handled.has(a.id));
+  const dateLabel = new Date(`${day}T12:00:00`).toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
+
+  return (
+    <div className="min-h-full bg-page">
+      <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-white px-5 py-3">
+        <div className="flex items-center gap-3">
+          <div aria-hidden className="grid h-9 w-9 place-items-center rounded-xl bg-clinic">
+            <svg viewBox="0 0 32 32" className="h-5 w-5"><path d="M13 8h6v5h5v6h-5v5h-6v-5H8v-6h5z" fill="#F2F6F5" /></svg>
+          </div>
+          <div>
+            <p className="font-semibold leading-tight">{schedule?.clinic ?? "Sunrise Family Clinic"}</p>
+            <p className="text-[13px] leading-tight text-ink-soft">Front desk dashboard</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-1">
+          <button type="button" onClick={() => shift(-1)} aria-label="Previous day" className="grid h-8 w-8 place-items-center rounded-full hover:bg-page"><ChevronLeft className="h-4 w-4" /></button>
+          <p className="min-w-44 text-center font-medium">{dateLabel}</p>
+          <button type="button" onClick={() => shift(1)} aria-label="Next day" className="grid h-8 w-8 place-items-center rounded-full hover:bg-page"><ChevronRight className="h-4 w-4" /></button>
+          {!isToday && <button type="button" onClick={() => setDay(iso(new Date()))} className="ml-1 rounded-full px-3 py-1 text-[13px] text-clinic-deep hover:bg-clinic-tint">Today</button>}
+        </div>
+        <div className="ml-auto flex items-center gap-4">
+          <p className="flex items-center gap-2 text-[13px] text-ink-soft" aria-live="polite">
+            <span className={clsx("h-2 w-2 rounded-full", connected ? "bg-clinic" : "bg-handoff")} />
+            {connected ? "Live" : "Reconnecting…"}
+          </p>
+          <button type="button" onClick={() => { setSound((s) => !s); if (!sound) chime(); }} aria-pressed={sound}
+            className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] hover:bg-page">
+            {sound ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />} {sound ? "Alert sound on" : "Turn on alert sound"}
+          </button>
+        </div>
+      </header>
+
+      <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1fr)_380px]">
+        <main className="min-w-0 space-y-4">
+          <Alerts alerts={visibleAlerts} onDismiss={(id) => setHandled((h) => new Set(h).add(id))} />
+          {error && <p role="alert" className="rounded-lg bg-alarm/10 px-3 py-2 text-[14px] text-alarm-deep">{error}</p>}
+          <div className="rounded-2xl border border-line bg-white p-3">
+            {schedule ? <Schedule data={schedule} flash={flash} isToday={isToday} onAction={act} /> : <p className="p-6 text-ink-soft">Loading the schedule…</p>}
+          </div>
+          <p className="text-[12px] text-ink-soft">Click a booking to check the patient in or update it. Patient names are shortened and phone numbers hidden on this screen.</p>
+        </main>
+        <aside className="space-y-6 rounded-2xl border border-line bg-white p-4 xl:self-start">
+          <XRay graph={graph} run={run} runs={runs} onSelect={setSelected} />
+          <Numbers s={stats} />
+        </aside>
+      </div>
+    </div>
+  );
+}

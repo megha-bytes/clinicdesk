@@ -646,6 +646,27 @@ the real model does). `REDTEAM_TOKEN` header skips the per-IP rate limit for the
 
 Results (scripted): **60/60** (+1 HTTP-level case in pytest). Tests: **405 passed** on SQLite and Postgres.
 
+### 2026-10-20 · Days 15–16: staff dashboard and Agent X-ray
+
+Backend (`app/staff_api.py`): `GET /ops/schedule` (doctors, hours, token "now serving", appointments with
+shortened names, source and "booked by the assistant"), `GET /ops/stats` (bookings by the assistant, model cost
+per booking/conversation, cost and p50 by tier, p50/p95 by node, guardrail counts, red-team results),
+`GET /ops/alerts` (emergencies + handoffs, 24 h), `GET /ops/graph` (nodes and edges from the compiled
+LangGraph), `POST /ops/appointments/{id}/check-in|start|complete|no-show` (engine-validated, audited as staff,
+published live). `scripts/redteam.py` also writes `backend/redteam/results-<mode>.json` for the dashboard.
+
+Frontend (`/staff`): time-grid schedule (doctor columns, closed hours hatched, now line, sticky headers, opens
+at the current time), booking menus for staff actions, live updates over `WS /ops/ws` with reconnect from the
+last cursor, flash on new bookings, emergency banner + WebAudio chime (sound needs one click, a browser rule),
+handoff banner, Agent X-ray (SVG of the real graph; active node, walked path, guardrail colour; per-turn
+timeline of model calls with tier/latency/cost, tools, guardrails, cards), "Today" numbers.
+
+Checked in headless Chromium with a patient booking and an emergency in a second tab: the X-ray lit up node by
+node, the booking appeared highlighted with the assistant icon, the emergency banner and the NeMo guardrail step
+appeared within the turn. Fixes during review: 10-minute visits overlapped at 1.15 px/min → 2.1 px/min with a
+scrolling grid; straight X-ray edges crossed boxes → curved edges; back edges clipped → wider viewBox.
+Tests: backend **412 passed** (7 new staff tests, weekday-independent); frontend 6 passed; build 62 KB gzip.
+
 ---
 
 ## How to add an entry

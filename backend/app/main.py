@@ -14,6 +14,7 @@ from app import db
 from app.admin import router as admin_router
 from app.chat_api import router as chat_router
 from app.realtime.routes import router as ops_router
+from app.staff_api import router as staff_router
 from app.payments.routes import router as payments_router
 from app.settings import get_settings
 from app.telemetry import setup_telemetry, tracer
@@ -53,6 +54,7 @@ app.include_router(payments_router)
 app.include_router(admin_router)
 app.include_router(chat_router)
 app.include_router(ops_router)
+app.include_router(staff_router)
 
 
 @app.head("/", include_in_schema=False)

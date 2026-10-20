@@ -71,6 +71,9 @@ def main() -> None:
         {"mode": mode, "run_at": when, **summary,
          "failures": [{"id": r.id, "category": r.category, "failures": r.failures}
                       for r in results if not r.passed and not r.skipped]}, indent=2, ensure_ascii=False), encoding="utf-8")
+    # The staff dashboard shows the latest result (the backend container doesn't include docs/).
+    (ROOT / "backend" / "redteam" / f"results-{mode}.json").write_text(
+        (out / f"redteam-{mode}.json").read_text(encoding="utf-8"), encoding="utf-8")
     print(f"\n{mode}: {summary['passed']}/{summary['total']} passed")
     for cat, v in summary["by_category"].items():
         print(f"  {cat:10} {v['passed']}/{v['total']}")

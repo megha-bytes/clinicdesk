@@ -116,6 +116,15 @@ Asking for a person hands over to staff with a 2-line note written by Nemotron U
 logged in `guardrail_event` (no patient text). `/health` shows which engine is running (`nemo-guardrails`
 in the container; on Python 3.14, where NeMo isn't available yet, the same checks run directly).
 
+## Staff dashboard and Agent X-ray
+
+`/staff` on the app: today's schedule per doctor (bookings appear live, tagged when the assistant, a phone
+call or another agent made them), check-in / start / finish / no-show, emergency alerts with sound, handoff
+requests, and the **Agent X-ray**: the real LangGraph workflow drawn from the compiled graph, lighting up step
+by step during a conversation, with every model call (tier, latency, cost), tool and guardrail decision.
+"Today" shows bookings, model cost per booking, typical latency, guardrail decisions and the red-team result.
+Patient names are shortened and phone numbers hidden; set `STAFF_DASHBOARD_TOKEN` to require `?token=`.
+
 ## Red-team suite
 
 61 scripted attack and edge-case conversations in `backend/redteam/cases.yaml` across 10 categories:
