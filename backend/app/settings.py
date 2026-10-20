@@ -38,10 +38,14 @@ class Settings(BaseSettings):
     otel_service_name: str = "clinicdesk"
     otel_exporter_otlp_endpoint: str | None = None   # e.g. http://localhost:4317
 
-    @field_validator("database_url", "token_factory_base_url", "cors_origins", "public_base_url", "payment_provider", mode="before")
+    @field_validator("database_url", "token_factory_base_url", "cors_origins", "public_base_url", "payment_provider",
+                     "otel_exporter_otlp_endpoint", mode="before")
     @classmethod
     def _blank_means_default(cls, v, info):
-        # A blank line copied from .env.example (e.g. "DATABASE_URL=") falls back to the default.
+        # A blank line copied from .env.example ("DATABASE_URL=") or one whose value is only a comment
+        # ("OTEL_EXPORTER_OTLP_ENDPOINT=   # http://…") falls back to the default.
+        if isinstance(v, str) and "#" in v and v.split("#", 1)[0].strip() == "":
+            v = ""
         if v is None or (isinstance(v, str) and not v.strip()):
             return cls.model_fields[info.field_name].default
         return v

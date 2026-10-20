@@ -99,3 +99,16 @@ def test_staff_token_required_when_set(client, monkeypatch):
     monkeypatch.setenv("STAFF_DASHBOARD_TOKEN", "t0ken")
     assert client.get("/ops/schedule").status_code == 401
     assert client.get("/ops/schedule?token=t0ken").status_code == 200
+
+
+def test_booking_event_carries_the_date(client):
+    from app.realtime.events import EventType  # noqa: F401
+    sch = client.get(f"/ops/schedule?day={workday()}").json()
+    appt = next(a for a in sch["appointments"] if a["status"] == "confirmed")
+    assert client.post(f"/ops/appointments/{appt['id']}/check-in").json()["date"] == workday()
+
+
+def test_comment_only_env_value_is_empty(monkeypatch):
+    from app.settings import Settings
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "   # http://localhost:4317 with docker compose")
+    assert Settings().otel_exporter_otlp_endpoint is None

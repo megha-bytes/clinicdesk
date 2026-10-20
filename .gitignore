@@ -37,3 +37,8 @@ traces.jsonl
 .idea/
 .vscode/
 *.tsbuildinfo
+
+# Downloaded patches and SQLite side files
+*.patch
+*.db-shm
+*.db-wal

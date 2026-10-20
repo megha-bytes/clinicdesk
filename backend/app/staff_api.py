@@ -202,7 +202,8 @@ def staff_action(appt_id: str, action: Literal["check-in", "start", "complete", 
         s.commit()
         doctor = s.get(m.Doctor, row.doctor_id)
         payload = {"action": action, "appointment_id": row.id, "doctor": doctor.name, "status": row.status,
-                   "token_no": row.token_no, "when": _hhmm(row.start, tz), "channel": "staff"}
+                   "token_no": row.token_no, "when": _hhmm(row.start, tz), "channel": "staff",
+                   "date": repo._aware(row.start, tz).astimezone(tz).date().isoformat()}
         clinic_id = clinic.id
     ev = EventFactory("staff").make(EventType.BOOKING_CHANGED, None, **payload).model_dump(mode="json")
     hub.publish(ops_channel(clinic_id), ev)

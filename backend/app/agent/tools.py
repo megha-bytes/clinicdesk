@@ -641,7 +641,8 @@ def run_tool(name: str, args: dict | None, ctx: ToolContext, *, allow_hidden: bo
     emit("tool.finished", tool=name, call_id=call_id, ok=bool(out.get("ok")), error=out.get("error"))
     if out.get("ok") and name in ("book", "reschedule", "cancel"):
         emit("booking.changed", action=name, appointment_id=out.get("appointment_id"), doctor=out.get("doctor"),
-             when=out.get("when"), status=out.get("status"), token_no=out.get("token_no"), channel=ctx.channel)
+             when=out.get("when"), status=out.get("status"), token_no=out.get("token_no"), channel=ctx.channel,
+             date=(out.get("start") or "")[:10] or None)
     if out.get("ok") and name == "raise_emergency_alert":
         emit("emergency", conversation_id=ctx.conversation_id)
     if out.get("ok") and name == "handoff_to_staff":

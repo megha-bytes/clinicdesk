@@ -20,6 +20,9 @@ export default function StaffApp() {
   const [sound, setSound] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; date: string } | null>(null);
+  const dayRef = useRef(day);
+  dayRef.current = day;
   const soundRef = useRef(sound);
   soundRef.current = sound;
 
@@ -33,7 +36,11 @@ export default function StaffApp() {
   const { runs, connected } = useStaffFeed({
     booking: (e) => {
       const id = String(e.payload.appointment_id ?? "");
+      const date = String(e.payload.date ?? "");
       loadSchedule();
+      if (date && date !== dayRef.current && e.payload.action === "book") {
+        setNotice({ text: `New booking: ${e.payload.doctor}, ${e.payload.when}`, date });
+      }
       if (id) {
         setFlash((f) => new Set(f).add(id));
         setTimeout(() => setFlash((f) => { const n = new Set(f); n.delete(id); return n; }), 4000);
@@ -88,6 +95,14 @@ export default function StaffApp() {
       <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1fr)_380px]">
         <main className="min-w-0 space-y-4">
           <Alerts alerts={visibleAlerts} onDismiss={(id) => setHandled((h) => new Set(h).add(id))} />
+          {notice && (
+            <div role="status" className="flex items-center gap-3 rounded-xl border border-clinic/30 bg-clinic-tint px-4 py-2.5">
+              <p className="flex-1 text-[15px]">{notice.text}</p>
+              <button type="button" onClick={() => { setDay(notice.date); setNotice(null); }}
+                className="rounded-lg bg-clinic px-3 py-1.5 text-[14px] font-semibold text-white hover:bg-clinic-deep">Show that day</button>
+              <button type="button" onClick={() => setNotice(null)} className="rounded-lg px-2 py-1.5 text-[14px] text-ink-soft hover:bg-white">Dismiss</button>
+            </div>
+          )}
           {error && <p role="alert" className="rounded-lg bg-alarm/10 px-3 py-2 text-[14px] text-alarm-deep">{error}</p>}
           <div className="rounded-2xl border border-line bg-white p-3">
             {schedule ? <Schedule data={schedule} flash={flash} isToday={isToday} onAction={act} /> : <p className="p-6 text-ink-soft">Loading the schedule…</p>}

@@ -87,7 +87,9 @@ export function Schedule({ data, flash, isToday, onAction }: {
               <div key={a} className="absolute inset-x-0 bg-white" style={{ top: (toMin(a) - lo) * PX, height: (toMin(b) - toMin(a)) * PX }} />
             ))}
             {hours.map((h) => <div key={h} className="absolute inset-x-0 border-t border-line/60" style={{ top: (h - lo) * PX }} />)}
-            {d.on_leave && <p className="absolute inset-x-0 top-6 text-center text-[13px] text-ink-soft">On leave</p>}
+            {(d.on_leave || !d.hours.length) && (
+              <p className="sticky top-24 mt-6 text-center text-[13px] text-ink-soft">{d.on_leave ? "On leave" : "Not in today"}</p>
+            )}
             {data.appointments.filter((a) => a.doctor_id === d.id).map((a) => (
               <Block key={a.id} a={a} flash={flash.has(a.id)} onAction={onAction}
                 top={(toMin(a.start) - lo) * PX + 1} height={Math.max(16, (toMin(a.end) - toMin(a.start)) * PX - 2)} />

@@ -46,6 +46,9 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 37 | Fourth live run: "3, not my first visit" held option **1** ("first" read as an ordinal pick), "3." not picked, age 3 stored, phone digits read as a date (re-search), typed answer to the card lost | Oct 20 | ✅ Fixed | Ordinals only as picks ("the first one"), leading "3."/"3," picks, age needs an age word or our question and never the picked number, digits ≠ date, dates normalised to ISO, not-found message, typed card answer → decline + new message, declined hold released |
 | 38 | First browser run (laptop, real Nemotron): "I couldn't find Firdauz…" though she never said she'd visited (model guessed new_patient=false); "Got it: <time>" repeated every turn | Oct 20 | ✅ Fixed | Returning/new patient only from her own words; "Got it" only on the turn the time is picked |
 | 39 | `npm install` on the laptop: 6 audit findings (dev tools: Vite 6.0, esbuild, Vitest 2); npm 10 crashes resolving Vitest 4/5 peers | Oct 20 | ✅ Fixed | Vite 8.3.2, Vitest 4.1.11, plugin-react 6.1.2, Tailwind 4.3.3, jsdom 30; lockfile made with npm 11; Node 24 pinned for CI/Render; `npm audit`: 0 vulnerabilities |
+| 40 | Dashboard looked empty after a booking: it was for tomorrow while the dashboard showed today (Dr. Iyer doesn't work Tuesdays) | Oct 20 | ✅ Fixed | "New booking … Show that day" notice for bookings on another day; "Not in today" on columns with no hours |
+| 41 | Laptop: `.env.local` line `OTEL_EXPORTER_OTLP_ENDPOINT=   # http://…` was read as the address → gRPC URI errors at startup | Oct 20 | ✅ Fixed | Comment-only values treated as empty; `.env.example` comment moved to its own line |
+| 42 | Downloaded `.patch` files and SQLite `-wal/-shm` files sitting untracked in the repo | Oct 20 | ✅ Fixed | Added to `.gitignore` |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
