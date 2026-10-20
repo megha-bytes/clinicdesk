@@ -34,10 +34,11 @@ def client(session, monkeypatch):
 
 
 def workday() -> str:
-    """A weekday within the seeded range (the demo clinic is closed on Sundays)."""
+    """The next weekday (tomorrow or later): the seed marks today's earlier visits completed, so late in the
+    evening today has no confirmed appointments left (DEVLOG #47). The demo clinic is closed on Sundays."""
     from datetime import timedelta
     from zoneinfo import ZoneInfo
-    d = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    d = datetime.now(ZoneInfo("Asia/Kolkata")).date() + timedelta(days=1)
     while d.weekday() > 4:
         d += timedelta(days=1)
     return d.isoformat()

@@ -53,6 +53,7 @@ Newest entries at the bottom. The **Open issues** table is the checklist to revi
 | 44 | Voice: spoken replies said "rupee sign", "W-E-D" and read whole numbered lists; spoken yes ("yes please", "haan ji theek hai") declined the card; spoken numbers ("nine eight four…", "दो नंबर", Devanagari/Kannada digits) not understood | Oct 20 | ✅ Fixed | `app/voice/`: spoken numbers → digits before the graph, short spoken yes/no answers the card, every reply gets a `speech` version (dates/times/fees in the caller's language, "Option 1: …", "Say yes or no.") |
 | 45 | `llm_call.tier` is `VARCHAR(8)` but "lightning" has 9 letters: on Postgres (Neon) every Lightning cost row failed to save (logged, not raised), so cost panels and the daily spend cap under-counted | Oct 20 | ✅ Fixed | Column widened to 16 (migration `9c1e7a4b2d10`, runs on deploy); found by the staff-stats test on Postgres |
 | 46 | Kannada text-to-speech depends on the device: Chrome desktop has no Kannada voice (Edge and Android with the Google Kannada pack do) | Oct 20 | 🟡 Watch | Call screen shows replies on screen when there's no voice; option: server-side Indian-language TTS later (cut list #1) |
+| 47 | Laptop, 9:35 pm: 2 staff tests failed (`StopIteration`): they looked for a confirmed visit *today*, but the seed marks today's earlier visits completed, so late in the evening none are left | Oct 20 | ✅ Fixed | Test-only: those tests use the next weekday. The app was fine; tests passed at 6 pm |
 
 Status key: 🔴 Open · 🟡 Watch/Waiting · ✅ Resolved · ⏸ Accepted
 
